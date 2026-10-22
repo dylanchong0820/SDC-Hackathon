@@ -1,2 +1,5 @@
 # Add your project dependencies here, one per line.
 runpod
+flask
+python-dotenv
+requests
