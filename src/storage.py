@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import datetime
 import json
 import mimetypes
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -180,18 +181,166 @@ class Store:
                                if row["attachment_state"] == "saved" else None)
         return result
 
-    def messages(self, conversation_id, before=None):
+    def messages(self, conversation_id, before=None, before_timestamp=None, before_seq=None,
+                 around_timestamp=None, around_seq=None):
         with self.db() as db:
             db.execute("BEGIN")
             conversation = db.execute("SELECT history_revision FROM conversations WHERE id=?",
                                       (conversation_id,)).fetchone()
-            rows = db.execute(
-                "SELECT * FROM messages WHERE conversation_id=? AND seq<? "
-                "ORDER BY seq DESC LIMIT 101",
-                (conversation_id, before or 9223372036854775807)).fetchall()
-        return {"messages": [self.public_message(dict(r)) for r in reversed(rows[:100])],
-                "has_more": len(rows) > 100,
-                "history_revision": conversation["history_revision"] if conversation else 0}
+            if around_timestamp is not None and around_seq is not None:
+                older = db.execute("""
+                    SELECT * FROM messages WHERE conversation_id=?
+                    AND (timestamp<? OR (timestamp=? AND seq<?))
+                    ORDER BY timestamp DESC,seq DESC LIMIT 51
+                """, (conversation_id, around_timestamp, around_timestamp, around_seq)).fetchall()
+                newer = db.execute("""
+                    SELECT * FROM messages WHERE conversation_id=?
+                    AND (timestamp>? OR (timestamp=? AND seq>=?))
+                    ORDER BY timestamp,seq LIMIT 50
+                """, (conversation_id, around_timestamp, around_timestamp, around_seq)).fetchall()
+                visible = list(reversed(older[:50])) + newer
+                has_more = len(older) > 50
+            elif before_timestamp is not None and before_seq is not None:
+                rows = db.execute("""
+                    SELECT * FROM messages WHERE conversation_id=?
+                    AND (timestamp<? OR (timestamp=? AND seq<?))
+                    ORDER BY timestamp DESC,seq DESC LIMIT 101
+                """, (conversation_id, before_timestamp, before_timestamp, before_seq)).fetchall()
+                visible, has_more = rows[:100], len(rows) > 100
+            else:
+                # The seq-only cursor remains for compatibility with older clients.
+                where = "AND seq<?" if before is not None else ""
+                params = (conversation_id, before) if before is not None else (conversation_id,)
+                rows = db.execute(
+                    f"SELECT * FROM messages WHERE conversation_id=? {where} "
+                    "ORDER BY timestamp DESC,seq DESC LIMIT 101", params).fetchall()
+                visible, has_more = rows[:100], len(rows) > 100
+            chronological = list(reversed(visible))
+            next_before = None
+            if has_more and chronological:
+                next_before = {"timestamp": chronological[0]["timestamp"],
+                               "seq": chronological[0]["seq"]}
+        return {
+            "messages": [self.public_message(dict(row)) for row in chronological],
+            "has_more": has_more, "next_before": next_before,
+            "history_revision": conversation["history_revision"] if conversation else 0,
+        }
+
+    def search_messages(self, query, limit=40):
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        pattern = f"%{escaped}%"
+        with self.db() as db:
+            rows = db.execute("""
+                SELECT m.id AS message_id,m.seq,m.conversation_id,m.direction,m.type,
+                       m.body,m.caption,m.filename,m.timestamp,c.name,c.wa_id
+                FROM messages m JOIN conversations c ON c.id=m.conversation_id
+                WHERE m.body LIKE ? ESCAPE '\\' COLLATE NOCASE
+                   OR m.caption LIKE ? ESCAPE '\\' COLLATE NOCASE
+                   OR m.filename LIKE ? ESCAPE '\\' COLLATE NOCASE
+                ORDER BY m.timestamp DESC,m.seq DESC LIMIT ?
+            """, (pattern, pattern, pattern, limit)).fetchall()
+        results = []
+        for row in rows:
+            item = dict(row)
+            content = item["body"] or item["caption"] or item["filename"] or item["type"]
+            index = content.casefold().find(query.casefold())
+            start = max(0, index - 70) if index >= 0 else 0
+            end = min(len(content), start + 180)
+            item["snippet"] = ("…" if start else "") + content[start:end] + (
+                "…" if end < len(content) else "")
+            results.append(item)
+        return results
+
+    def import_history(self, phone_number_id, wa_id, display_name, records):
+        """Add a parsed export once without changing reply-window or delete state."""
+        from collections import Counter
+        from hashlib import sha256
+
+        with self.log_lock:
+            log_existed = self.log_path.exists()
+            log_size = self.log_path.stat().st_size if log_existed else 0
+            try:
+                with self.db() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    configured = db.execute(
+                        "SELECT value FROM settings WHERE key='phone_number_id'").fetchone()
+                    if not configured or configured["value"] != phone_number_id:
+                        raise ValueError("The selected business number is no longer configured.")
+
+                    db.execute(
+                        "INSERT OR IGNORE INTO conversations(phone_number_id,wa_id,name) "
+                        "VALUES (?,?,?)", (phone_number_id, wa_id, display_name or wa_id))
+                    if display_name:
+                        db.execute(
+                            "UPDATE conversations SET name=? WHERE phone_number_id=? AND wa_id=? "
+                            "AND (name='' OR name=wa_id)",
+                            (display_name, phone_number_id, wa_id))
+                    conversation = db.execute("""
+                        SELECT c.*,COALESCE(p.display_phone_number,'') AS display_phone_number
+                        FROM conversations c LEFT JOIN phones p ON p.id=c.phone_number_id
+                        WHERE c.phone_number_id=? AND c.wa_id=?
+                    """, (phone_number_id, wa_id)).fetchone()
+                    conversation = dict(conversation)
+
+                    duplicate_counts = Counter()
+                    inserted_rows = []
+                    for record in records:
+                        identity = (f"{phone_number_id}\0{wa_id}\0{record['timestamp']}\0"
+                                    f"{record['direction']}\0{record['body']}")
+                        occurrence = duplicate_counts[identity]
+                        duplicate_counts[identity] += 1
+                        message_id = "history_" + sha256(
+                            f"{identity}\0{occurrence}".encode("utf-8")).hexdigest()
+                        if db.execute("SELECT 1 FROM deleted_messages WHERE id=?",
+                                      (message_id,)).fetchone():
+                            continue
+                        cursor = db.execute("""
+                            INSERT OR IGNORE INTO messages
+                            (id,conversation_id,direction,type,body,timestamp,status,
+                             attachment_state,raw)
+                            VALUES (?,?,?,'text',?,?,'history','none',?)
+                        """, (message_id, conversation["id"], record["direction"],
+                              record["body"], record["timestamp"],
+                              json.dumps({"source": "whatsapp_text_export",
+                                          "sender": record.get("author", "")},
+                                         ensure_ascii=False)))
+                        if cursor.rowcount:
+                            inserted_rows.append({
+                                "id": message_id, "conversation_id": conversation["id"],
+                                "direction": record["direction"], "type": "text",
+                                "body": record["body"], "caption": "", "timestamp": record["timestamp"],
+                                "status": "history", "media_id": None,
+                            })
+
+                    if inserted_rows:
+                        latest = max(inserted_rows, key=lambda row: (row["timestamp"], row["id"]))
+                        db.execute("""
+                            UPDATE conversations
+                            SET last_message=?,last_message_at=?
+                            WHERE id=? AND last_message_at<=?
+                        """, (latest["body"][:500], latest["timestamp"],
+                              conversation["id"], latest["timestamp"]))
+
+                    if inserted_rows:
+                        with self.log_path.open("a", encoding="utf-8") as handle:
+                            for row in inserted_rows:
+                                handle.write(self.format_log_message(row, conversation))
+                            handle.flush()
+                            os.fsync(handle.fileno())
+            except Exception:
+                try:
+                    if log_existed:
+                        with self.log_path.open("r+b") as handle:
+                            handle.truncate(log_size)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                    elif self.log_path.exists():
+                        self.log_path.unlink()
+                except OSError:
+                    pass
+                raise
+        return {"conversation_id": conversation["id"], "messages_imported": len(inserted_rows),
+                "duplicates_skipped": len(records) - len(inserted_rows)}
 
     def insert_inbound(self, conversation_id, record):
         with self.db() as db:

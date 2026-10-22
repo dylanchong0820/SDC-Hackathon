@@ -50,7 +50,11 @@ profile share that browser's session.
 
 The UI configuration indicators mean a value exists, not that Meta accepted or
 verified it. The app never imports historical messages from Meta: that API is
-send-only, and only future subscribed events reach this receiver.
+send-only, and only future subscribed events reach this receiver. Staff can
+search saved message text and import a one-to-one WhatsApp UTF-8 `.txt` export
+(maximum 8 MB). Imports are text-only; exported media files are not added.
+Imported rows are deduplicated, appended to the readable text archive, and
+never advance the live inbound timestamp or activate a reply window.
 
 ## Data and behavior
 

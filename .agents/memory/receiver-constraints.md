@@ -15,6 +15,19 @@ with an option to include attachments.
 **How to apply:** Keep archive behavior when extending or changing storage, and
 explain deployment durability limits rather than quietly discarding local files.
 
+Manually imported chat transcripts are historical reference, not proof of a
+new WhatsApp event. Do not let an import advance `last_inbound_at` or open the
+24-hour reply window; retain message-ID tombstones so deleting history cannot
+be undone by importing the same export again.
+
+**Why:** A local export is not signed by Meta and can contain dates edited by
+the person importing it. Using it as a live inbound event could incorrectly
+enable a free-form WhatsApp reply.
+
+**How to apply:** Any future export format or import route must preserve this
+separation and test duplicate imports, post-deletion imports, and reply-window
+state without calling the Meta send API.
+
 Treat upstream as read-only. Repository branch merges/deletions and pushes must
 target origin only; leave the internal Replit backup remote alone.
 

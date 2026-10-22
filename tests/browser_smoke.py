@@ -111,6 +111,28 @@ def run():
                 # Show settings and save a business phone ID using normal API/UI.
                 page.get_by_role("button", name="Settings", exact=True).click()
                 page.get_by_text("Meta App Dashboard", exact=False).first.wait_for()
+                export_file = outputs / "history-export.txt"
+                export_file.write_text(
+                    "2024-01-02, 10:00 - Browser Test Contact: This is the archived needle\n"
+                    "2024-01-02, 10:01 - Support Team: I will review the old file\n",
+                    encoding="utf-8",
+                )
+                page.get_by_label("WhatsApp chat export (.txt)", exact=True).set_input_files(str(export_file))
+                page.get_by_label("Client's international phone number", exact=True).fill("+60123456789")
+                page.get_by_label("Client name (optional)", exact=True).fill("Browser Test Contact")
+                page.get_by_label("Your name in the export (optional)", exact=True).fill("Support Team")
+                page.get_by_label("Date format for ambiguous dates", exact=True).select_option("YMD")
+                page.get_by_label("Time zone of the export", exact=True).fill("UTC")
+                page.get_by_role("button", name="Import chat history", exact=True).click()
+                expect(page.get_by_text("Chat history imported. No WhatsApp messages were sent.")).to_be_visible()
+                expect(page.get_by_text("This is the archived needle", exact=True)).to_be_visible()
+                assert graph.sent == ["I have received your documents."], "History import must not send a WhatsApp message"
+                page.get_by_role("button", name="Search messages", exact=True).click()
+                page.get_by_label("Search saved message text", exact=True).fill("archived needle")
+                page.locator(".history-result").first.click()
+                expect(page.get_by_text("This is the archived needle", exact=True)).to_be_visible()
+                page.get_by_role("button", name="Settings", exact=True).click()
+                page.get_by_text("Meta App Dashboard", exact=False).first.wait_for()
                 page.get_by_label("Or enter ID manually", exact=True).fill("987654321")
                 page.get_by_role("button", name="Save default", exact=True).click()
                 expect(page.get_by_text("Default number saved.", exact=True)).to_be_visible()

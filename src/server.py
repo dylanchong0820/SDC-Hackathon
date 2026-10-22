@@ -14,11 +14,14 @@ from flask import Flask, abort, jsonify, render_template, request, send_file, se
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.serving import WSGIRequestHandler
+from werkzeug.utils import secure_filename
 
 if __package__:
+    from .history_import import HistoryImportError, parse_whatsapp_export
     from .storage import Store, StorageBusyError
     from .whatsapp import GraphClient, GraphError, MediaWorker, process_event
 else:
+    from history_import import HistoryImportError, parse_whatsapp_export
     from storage import Store, StorageBusyError
     from whatsapp import GraphClient, GraphError, MediaWorker, process_event
 
@@ -37,7 +40,7 @@ def create_app(config=None):
         META_GRAPH_VERSION=os.getenv("META_GRAPH_VERSION", "v23.0"),
         DATA_DIR=PROJECT_ROOT / "whatsapp_data",
         MEDIA_WORKER=True,
-        MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+        MAX_CONTENT_LENGTH=9 * 1024 * 1024,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
         PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
@@ -203,7 +206,61 @@ def create_app(config=None):
         if not store.conversation(conversation_id):
             return jsonify(error="Conversation not found."), 404
         before = request.args.get("before", type=int)
-        return jsonify(store.messages(conversation_id, before))
+        before_timestamp = request.args.get("before_timestamp", type=int)
+        before_seq = request.args.get("before_seq", type=int)
+        around_timestamp = request.args.get("around_timestamp", type=int)
+        around_seq = request.args.get("around_seq", type=int)
+        return jsonify(store.messages(conversation_id, before, before_timestamp, before_seq,
+                                      around_timestamp, around_seq))
+
+    @app.get("/api/messages/search")
+    @require_staff
+    def search_messages():
+        query = request.args.get("q", "").strip()[:120]
+        if len(query) < 2:
+            return jsonify(results=[])
+        return jsonify(results=store.search_messages(query))
+
+    @app.post("/api/history/import")
+    @require_staff
+    def import_history():
+        uploaded = request.files.get("file")
+        if not uploaded or not uploaded.filename:
+            return jsonify(error="Choose a WhatsApp .txt chat export to import."), 400
+        if Path(secure_filename(uploaded.filename)).suffix.lower() != ".txt":
+            return jsonify(error="For now, import WhatsApp's plain-text .txt export (without media)."), 400
+        content = uploaded.read(8 * 1024 * 1024 + 1)
+        if len(content) > 8 * 1024 * 1024:
+            return jsonify(error="This export is over the 8 MB import limit."), 413
+        if not content.strip():
+            return jsonify(error="The selected chat export is empty."), 400
+
+        wa_id = re.sub(r"\D", "", request.form.get("client_phone", ""))[:15]
+        if not re.fullmatch(r"\d{7,15}", wa_id):
+            return jsonify(error="Enter the client's international phone number (7–15 digits)."), 400
+        phone_number_id = store.setting("phone_number_id")
+        if not re.fullmatch(r"\d+", phone_number_id):
+            return jsonify(error="Configure the business phone number ID in Settings first."), 409
+        display_name = request.form.get("client_name", "").strip()[:120]
+        try:
+            parsed = parse_whatsapp_export(
+                content,
+                date_order=request.form.get("date_order", "DMY"),
+                timezone_name=request.form.get("timezone", "Asia/Kuala_Lumpur"),
+                business_name=request.form.get("business_name", "")[:120],
+            )
+        except HistoryImportError as error:
+            return jsonify(error=str(error)), 400
+        if not display_name:
+            display_name = parsed["contact_sender"][:120]
+
+        try:
+            result = store.import_history(
+                phone_number_id, wa_id, display_name, parsed["messages"])
+        except ValueError as error:
+            return jsonify(error=str(error)), 409
+        return jsonify(**result, contact_sender=parsed["contact_sender"],
+                       skipped_lines=parsed["skipped_lines"]), 201
 
     @app.post("/api/conversations/<int:conversation_id>/read")
     @require_staff

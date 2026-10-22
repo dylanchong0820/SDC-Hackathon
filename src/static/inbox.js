@@ -18,11 +18,14 @@
   };
   const state = {
     csrf: "", authenticated: false, staffConfigured: true, status: null, settings: null,
-    conversations: [], visibleConversations: null, selectedId: null, messages: [], hasMore: false, beforeSeq: null,
+    conversations: [], visibleConversations: null, selectedId: null, messages: [], hasMore: false,
+    beforeSeq: null, beforeTimestamp: null,
     mode: "inbox", search: "", drafts: new Map(), pendingSend: null, pollError: "",
     loadingMessages: false, sending: false, polling: false, lastStatusSuccess: 0,
     listError: "", initialMessagesLoaded: false, pollIssues: {}, handlingExpiredSession: false,
-    conversationRequestId: 0, historyRevision: null, historyEpoch: 0
+    conversationRequestId: 0, messageSearchRequestId: 0, messageSearchActive: false,
+    messageSearchResults: [], messageSearchError: "", messageSearchLoading: false,
+    openAround: null, highlightMessageId: null, historyRevision: null, historyEpoch: 0
   };
   let refs = {};
   let pollTimer = null;
@@ -66,14 +69,15 @@
   }
   async function request(path, options = {}) {
     const headers = new Headers(options.headers || {});
-    if (options.body !== undefined) headers.set("Content-Type", "application/json");
+    const isMultipart = typeof FormData !== "undefined" && options.body instanceof FormData;
+    if (options.body !== undefined && !isMultipart) headers.set("Content-Type", "application/json");
     if (options.method && options.method !== "GET" && state.csrf) headers.set("X-CSRF-Token", state.csrf);
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetch(path, {
         ...options, headers, credentials: "include", signal: controller.signal,
-        body: options.body === undefined ? undefined : JSON.stringify(options.body)
+        body: options.body === undefined ? undefined : (isMultipart ? options.body : JSON.stringify(options.body))
       });
       let data = {};
       try {
@@ -296,16 +300,38 @@
     search.appendChild(icon("search"));
     const searchInput = node("input", "search-input");
     searchInput.type = "search";
-    searchInput.placeholder = "Find a conversation";
-    searchInput.setAttribute("aria-label", "Search conversations");
+    searchInput.placeholder = state.messageSearchActive ? "Search saved message text" : "Find a conversation";
+    searchInput.setAttribute("aria-label", state.messageSearchActive ? "Search saved message text" : "Search conversations");
     searchInput.value = state.search;
+    refs.searchInput = searchInput;
     searchInput.addEventListener("input", () => {
       state.search = searchInput.value;
       window.clearTimeout(searchTimer);
-      searchTimer = window.setTimeout(refreshConversations, 250);
+      searchTimer = window.setTimeout(
+        state.messageSearchActive ? searchMessageHistory : refreshConversations, 250);
     });
     search.appendChild(searchInput);
     sidebar.appendChild(search);
+    refs.searchModeButton = button(
+      state.messageSearchActive ? "Back to chats" : "Search messages",
+      "secondary-button history-search-toggle", null, () => {
+        state.messageSearchActive = !state.messageSearchActive;
+        state.search = "";
+        state.messageSearchResults = [];
+        state.messageSearchError = "";
+        if (refs.searchInput) {
+          refs.searchInput.value = "";
+          refs.searchInput.placeholder = state.messageSearchActive
+            ? "Search saved message text" : "Find a conversation";
+          refs.searchInput.setAttribute("aria-label", state.messageSearchActive
+            ? "Search saved message text" : "Search conversations");
+        }
+        refs.searchModeButton.textContent = state.messageSearchActive
+          ? "Back to chats" : "Search messages";
+        if (state.messageSearchActive) renderConversationList();
+        else refreshConversations();
+      });
+    sidebar.appendChild(refs.searchModeButton);
     const meta = node("div", "inbox-meta");
     refs.count = node("span", "", "— conversations");
     refs.syncLabel = node("span", "", "Syncing");
@@ -328,6 +354,57 @@
   function renderConversationList() {
     if (!refs.conversationList) return;
     refs.conversationList.replaceChildren();
+    if (state.messageSearchActive) {
+      const query = state.search.trim();
+      refs.count.textContent = state.messageSearchLoading
+        ? "Searching messages…" : `${state.messageSearchResults.length} message matches`;
+      if (query.length < 2) {
+        refs.conversationList.appendChild(node("div", "list-empty",
+          "Type at least two characters to search saved message text."));
+        return;
+      }
+      if (state.messageSearchError) {
+        const error = node("div", "list-empty", state.messageSearchError);
+        const retry = button("Try again", "retry-media", null, searchMessageHistory);
+        error.appendChild(retry);
+        refs.conversationList.appendChild(error);
+        return;
+      }
+      if (state.messageSearchLoading) {
+        refs.conversationList.appendChild(node("div", "list-empty", "Searching the saved chat history…"));
+        return;
+      }
+      if (!state.messageSearchResults.length) {
+        refs.conversationList.appendChild(node("div", "list-empty", "No saved messages match that text."));
+        return;
+      }
+      for (const result of state.messageSearchResults) {
+        const item = node("button", "history-result");
+        item.type = "button";
+        item.append(
+          node("span", "history-result-name", result.name || result.wa_id || "Unknown customer"),
+          node("span", "history-result-preview",
+            `${result.direction === "outbound" ? "You" : "Client"} · ${result.snippet}`),
+          node("span", "history-result-time", shortTime(result.timestamp))
+        );
+        item.addEventListener("click", () => {
+          state.messageSearchActive = false;
+          state.search = "";
+          if (refs.searchInput) {
+            refs.searchInput.value = "";
+            refs.searchInput.placeholder = "Find a conversation";
+            refs.searchInput.setAttribute("aria-label", "Search conversations");
+          }
+          if (refs.searchModeButton) refs.searchModeButton.textContent = "Search messages";
+          state.visibleConversations = null;
+          selectConversation(result.conversation_id, {
+            timestamp: result.timestamp, seq: result.seq, messageId: result.message_id
+          });
+        });
+        refs.conversationList.appendChild(item);
+      }
+      return;
+    }
     const items = state.visibleConversations === null ? state.conversations : state.visibleConversations;
     refs.count.textContent = `${items.length} conversation${items.length === 1 ? "" : "s"}`;
     if (!items.length && !state.listError) {
@@ -552,7 +629,8 @@
   }
   function renderMessage(message) {
     const outbound = message.direction === "outbound";
-    const row = node("article", `message-row${outbound ? " outgoing" : ""}`);
+    const row = node("article", `message-row${outbound ? " outgoing" : ""}${state.highlightMessageId === message.id ? " search-hit" : ""}`);
+    row.dataset.messageId = String(message.id);
     const bubble = node("div", "bubble");
     const type = String(message.type || "unknown").toLowerCase();
     if (!typeKnown(type)) {
@@ -635,7 +713,9 @@
     }
     const meta = node("div", "message-meta");
     meta.appendChild(node("time", "", shortTime(message.timestamp)));
-    if (outbound) {
+    if (message.status === "history") {
+      meta.appendChild(node("span", "message-status", "Imported"));
+    } else if (outbound) {
       const status = String(message.status || "sending").toLowerCase();
       const statusNode = node("span", `message-status${status === "failed" ? " failed" : ""}${status === "accepted" ? " accepted" : ""}`, statusLabel(status));
       if (status === "failed" && message.error) {
@@ -658,14 +738,17 @@
   function scrollToBottom() {
     if (refs.messageScroll) refs.messageScroll.scrollTop = refs.messageScroll.scrollHeight;
   }
-  async function selectConversation(id) {
+  async function selectConversation(id, match = null) {
     const current = state.selectedId;
     if (current !== null && refs.composerInput) state.drafts.set(String(current), refs.composerInput.value);
     state.selectedId = id;
     state.messages = [];
     state.hasMore = false;
     state.beforeSeq = null;
+    state.beforeTimestamp = null;
     state.loadingMessages = false;
+    state.openAround = match ? { timestamp: Number(match.timestamp), seq: Number(match.seq) } : null;
+    state.highlightMessageId = match ? String(match.messageId) : null;
     state.initialMessagesLoaded = false;
     state.historyRevision = null;
     renderConversationList();
@@ -684,7 +767,14 @@
     if (state.selectedId === null) return;
     const selectedId = state.selectedId;
     const epoch = state.historyEpoch;
-    const url = `/api/conversations/${encodeURIComponent(selectedId)}/messages`;
+    const around = state.openAround;
+    const params = new URLSearchParams();
+    if (around) {
+      params.set("around_timestamp", String(around.timestamp));
+      params.set("around_seq", String(around.seq));
+    }
+    const query = params.toString();
+    const url = `/api/conversations/${encodeURIComponent(selectedId)}/messages${query ? `?${query}` : ""}`;
     try {
       const data = await request(url);
       if (String(state.selectedId) !== String(selectedId) || epoch !== state.historyEpoch) return;
@@ -692,17 +782,27 @@
       if (state.historyRevision !== null && revision < state.historyRevision) return;
       if (state.historyRevision !== null && revision !== state.historyRevision) state.messages = [];
       state.historyRevision = revision;
+      if (state.openAround === around) state.openAround = null;
       const wasNearBottom = refs.messageScroll && (refs.messageScroll.scrollHeight - refs.messageScroll.scrollTop - refs.messageScroll.clientHeight < 90);
       const existing = new Map(state.messages.map((message) => [String(message.id), message]));
       for (const message of (data.messages || [])) existing.set(String(message.id), { ...existing.get(String(message.id)), ...message });
-      state.messages = Array.from(existing.values()).sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0));
+      state.messages = Array.from(existing.values()).sort((a, b) =>
+        Number(a.timestamp || 0) - Number(b.timestamp || 0) || Number(a.seq || 0) - Number(b.seq || 0));
       state.hasMore = Boolean(data.has_more);
-      state.beforeSeq = state.messages.length ? Math.min(...state.messages.map((message) => Number(message.seq)).filter(Number.isFinite)) : null;
+      state.beforeTimestamp = data.next_before?.timestamp ?? null;
+      state.beforeSeq = data.next_before?.seq ?? null;
       state.initialMessagesLoaded = true;
       delete state.pollIssues.messages;
       if (refs.main && state.mode === "inbox") {
         renderMessages();
-        if (wasNearBottom || isInitial) scrollToBottom();
+        if (isInitial && state.highlightMessageId) {
+          const hit = Array.from(refs.messageStack.querySelectorAll(".message-row"))
+            .find((item) => item.dataset.messageId === state.highlightMessageId);
+          if (hit) {
+            hit.scrollIntoView({ block: "center" });
+            state.highlightMessageId = null;
+          } else scrollToBottom();
+        } else if (wasNearBottom || isInitial) scrollToBottom();
       }
     } catch (err) {
       if (String(state.selectedId) !== String(selectedId)) return;
@@ -723,14 +823,14 @@
     if (state.mode === "inbox" && state.selectedId !== null) await fetchMessages(initial);
   }
   async function loadOlder() {
-    if (state.loadingMessages || !state.hasMore || state.beforeSeq === null) return;
+    if (state.loadingMessages || !state.hasMore || state.beforeSeq === null || state.beforeTimestamp === null) return;
     const conversationId = state.selectedId;
     const epoch = state.historyEpoch;
     state.loadingMessages = true;
     const scroll = refs.messageScroll;
     const previousHeight = scroll ? scroll.scrollHeight : 0;
     try {
-      const data = await request(`/api/conversations/${encodeURIComponent(conversationId)}/messages?before=${encodeURIComponent(state.beforeSeq)}`);
+      const data = await request(`/api/conversations/${encodeURIComponent(conversationId)}/messages?before_timestamp=${encodeURIComponent(state.beforeTimestamp)}&before_seq=${encodeURIComponent(state.beforeSeq)}`);
       if (String(state.selectedId) !== String(conversationId) || epoch !== state.historyEpoch) return;
       if (Number(data.history_revision || 0) !== state.historyRevision) {
         await fetchMessages(true);
@@ -738,9 +838,11 @@
       }
       const known = new Set(state.messages.map((message) => String(message.id)));
       const earlier = (data.messages || []).filter((message) => !known.has(String(message.id)));
-      state.messages = [...earlier, ...state.messages].sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0));
+      state.messages = [...earlier, ...state.messages].sort((a, b) =>
+        Number(a.timestamp || 0) - Number(b.timestamp || 0) || Number(a.seq || 0) - Number(b.seq || 0));
       state.hasMore = Boolean(data.has_more);
-      state.beforeSeq = state.messages.length ? Math.min(...state.messages.map((message) => Number(message.seq)).filter(Number.isFinite)) : null;
+      state.beforeTimestamp = data.next_before?.timestamp ?? null;
+      state.beforeSeq = data.next_before?.seq ?? null;
       renderMessages();
       if (scroll) scroll.scrollTop += scroll.scrollHeight - previousHeight;
     } catch (err) {
@@ -871,6 +973,32 @@
       updateConnection();
     }
   }
+  async function searchMessageHistory() {
+    const query = state.search.trim();
+    const requestId = ++state.messageSearchRequestId;
+    state.messageSearchError = "";
+    if (query.length < 2) {
+      state.messageSearchResults = [];
+      state.messageSearchLoading = false;
+      renderConversationList();
+      return;
+    }
+    state.messageSearchLoading = true;
+    renderConversationList();
+    try {
+      const data = await request(`/api/messages/search?q=${encodeURIComponent(query)}`);
+      if (requestId !== state.messageSearchRequestId || query !== state.search.trim()) return;
+      state.messageSearchResults = Array.isArray(data.results) ? data.results : [];
+    } catch (error) {
+      if (requestId !== state.messageSearchRequestId || query !== state.search.trim()) return;
+      state.messageSearchError = `Message search failed: ${error.message}`;
+    } finally {
+      if (requestId === state.messageSearchRequestId && query === state.search.trim()) {
+        state.messageSearchLoading = false;
+        renderConversationList();
+      }
+    }
+  }
   function updateConnection() {
     const issueText = Object.values(state.pollIssues).filter(Boolean).join(" · ");
     state.pollError = issueText;
@@ -945,8 +1073,127 @@
     back.addEventListener("click", () => setMode("inbox"));
     return back;
   }
+  function historyImportCard() {
+    const card = node("form", "settings-card history-import-card");
+    card.append(
+      node("h3", "", "Import older chat history"),
+      node("p", "", "Import one WhatsApp plain-text chat export (.txt). WhatsApp's Cloud API cannot fetch past chats. Media files are not included in text exports.")
+    );
+    const fileLabel = node("label", "field-label", "WhatsApp chat export (.txt)");
+    fileLabel.htmlFor = "history-export-file";
+    const file = node("input", "field-input history-file");
+    file.id = "history-export-file";
+    file.name = "file";
+    file.type = "file";
+    file.accept = ".txt,text/plain";
+    file.required = true;
+    const phoneLabel = node("label", "field-label", "Client's international phone number");
+    phoneLabel.htmlFor = "history-client-phone";
+    const phone = node("input", "field-input");
+    phone.id = "history-client-phone";
+    phone.name = "client_phone";
+    phone.type = "tel";
+    phone.placeholder = "+60123456789";
+    phone.autocomplete = "tel";
+    phone.required = true;
+    phone.maxLength = 25;
+    const nameLabel = node("label", "field-label", "Client name (optional)");
+    nameLabel.htmlFor = "history-client-name";
+    const name = node("input", "field-input");
+    name.id = "history-client-name";
+    name.name = "client_name";
+    name.maxLength = 120;
+    name.placeholder = "Name to show in the inbox";
+    const businessLabel = node("label", "field-label", "Your name in the export (optional)");
+    businessLabel.htmlFor = "history-business-name";
+    const business = node("input", "field-input");
+    business.id = "history-business-name";
+    business.name = "business_name";
+    business.maxLength = 120;
+    business.placeholder = "Use this to mark your messages as sent";
+    const businessHelp = node("p", "field-help",
+      "Messages labelled “You” or “Me” are marked as sent automatically.");
+    const dateLabel = node("label", "field-label", "Date format for ambiguous dates");
+    dateLabel.htmlFor = "history-date-order";
+    const dateOrder = document.createElement("select");
+    dateOrder.id = "history-date-order";
+    dateOrder.name = "date_order";
+    dateOrder.className = "field-select";
+    for (const [value, label] of [
+      ["DMY", "Day / month / year"],
+      ["MDY", "Month / day / year"],
+      ["YMD", "Year / month / day"]
+    ]) {
+      const option = node("option", "", label);
+      option.value = value;
+      dateOrder.appendChild(option);
+    }
+    const timezoneLabel = node("label", "field-label", "Time zone of the export");
+    timezoneLabel.htmlFor = "history-timezone";
+    const timezone = node("input", "field-input");
+    timezone.id = "history-timezone";
+    timezone.name = "timezone";
+    timezone.maxLength = 80;
+    timezone.required = true;
+    timezone.value = Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kuala_Lumpur";
+    timezone.placeholder = "Asia/Kuala_Lumpur";
+    const details = node("p", "field-help",
+      "Use a one-to-one chat export in UTF-8, up to 8 MB. This imports text only; photos and files are not extracted. It does not send messages or reopen WhatsApp's 24-hour reply window.");
+    const error = node("div", "inline-error hidden");
+    error.setAttribute("role", "alert");
+    const status = node("p", "save-note history-import-status", "");
+    const actions = node("div", "form-actions");
+    const submit = node("button", "primary-button", "Import chat history");
+    submit.type = "submit";
+    actions.append(status, submit);
+    card.append(fileLabel, file, phoneLabel, phone, nameLabel, name, businessLabel, business,
+      businessHelp, dateLabel, dateOrder, timezoneLabel, timezone, details, error, actions);
+    card.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!file.files || !file.files[0]) {
+        error.textContent = "Choose a WhatsApp .txt chat export.";
+        error.classList.remove("hidden");
+        return;
+      }
+      error.classList.add("hidden");
+      status.textContent = "Importing…";
+      submit.disabled = true;
+      const data = new FormData(card);
+      try {
+        const result = await request("/api/history/import", { method: "POST", body: data });
+        const skipped = Number(result.duplicates_skipped || 0);
+        status.textContent = `Imported ${result.messages_imported} message${result.messages_imported === 1 ? "" : "s"}` +
+          (skipped ? `; skipped ${skipped} duplicate${skipped === 1 ? "" : "s"}.` : ".");
+        if (Number(result.skipped_lines)) {
+          status.textContent += ` Ignored ${result.skipped_lines} export line${result.skipped_lines === 1 ? "" : "s"} that were not messages.`;
+        }
+        file.value = "";
+        await refreshConversations();
+        state.messageSearchActive = false;
+        state.search = "";
+        state.visibleConversations = null;
+        if (refs.searchInput) {
+          refs.searchInput.value = "";
+          refs.searchInput.placeholder = "Find a conversation";
+          refs.searchInput.setAttribute("aria-label", "Search conversations");
+        }
+        if (refs.searchModeButton) refs.searchModeButton.textContent = "Search messages";
+        setMode("inbox");
+        await selectConversation(result.conversation_id);
+        toast("Chat history imported. No WhatsApp messages were sent.");
+      } catch (err) {
+        status.textContent = "";
+        error.textContent = err.message;
+        error.classList.remove("hidden");
+      } finally {
+        submit.disabled = false;
+      }
+    });
+    return card;
+  }
   async function renderSettings() {
-    const page = pageHeading("Workspace controls", "Settings", "Choose the business number your team sends from. Secrets stay in Replit; this page never asks for tokens.");
+    const page = pageHeading("Workspace controls", "Settings", "Choose the business number, import older chat exports, and manage the desk. Secrets stay in Replit.");
+    page.appendChild(historyImportCard());
     const loading = node("div", "skeleton skeleton-line");
     loading.style.width = "100%";
     loading.style.height = "120px";
@@ -1120,6 +1367,9 @@
           state.initialMessagesLoaded = false;
           state.hasMore = false;
           state.beforeSeq = null;
+          state.beforeTimestamp = null;
+          state.openAround = null;
+          state.highlightMessageId = null;
           state.pendingSend = null;
         }
         dialog.close();
