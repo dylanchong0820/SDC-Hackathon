@@ -14,8 +14,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 # --- CONFIGURATION ---
-VERIFY_TOKEN = "my_custom_webhook_secret_123"
-ACCESS_TOKEN = "META_ACCESS_TOKEN"  # Paste your Bearer token here
+VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "my_custom_webhook_secret_123")
+ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN", "")
 LOG_FILE = "messages.txt"
 BASE_ATTACHMENT_DIR = "attachments"
 
@@ -164,4 +164,4 @@ def receive_message():
 
 
 if __name__ == "__main__":
-    app.run(port=5000)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
