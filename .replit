@@ -22,7 +22,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python src/server.py"
+args = "exec python src/server.py"
 waitForPort = 5000
 
 [workflows.workflow.metadata]

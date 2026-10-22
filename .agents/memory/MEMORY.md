@@ -1,2 +1,3 @@
 - [Receiver constraints](receiver-constraints.md) — preserve original file archives; Git writes target origin only, never upstream.
 - [Preview TLS trust](preview-tls-trust.md) — Python preview checks need the system CA bundle; never disable certificate verification.
+- [Workflow process cleanup](workflow-process-cleanup.md) — use `exec` for Python webserver workflow commands so restarts do not leave stale listeners.
