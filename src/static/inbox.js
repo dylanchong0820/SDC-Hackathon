@@ -68,21 +68,37 @@
     const headers = new Headers(options.headers || {});
     if (options.body !== undefined) headers.set("Content-Type", "application/json");
     if (options.method && options.method !== "GET" && state.csrf) headers.set("X-CSRF-Token", state.csrf);
-    const response = await fetch(path, {
-      ...options, headers, credentials: "include",
-      body: options.body === undefined ? undefined : JSON.stringify(options.body)
-    });
-    let data = {};
-    try { data = await response.json(); } catch (_) { /* Keep non-JSON failures readable. */ }
-    if (response.status === 401 && path !== "/api/login" && path !== "/api/session") {
-      await handleExpiredSession();
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15000);
+    try {
+      const response = await fetch(path, {
+        ...options, headers, credentials: "include", signal: controller.signal,
+        body: options.body === undefined ? undefined : JSON.stringify(options.body)
+      });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (err) {
+        if (controller.signal.aborted) throw err;
+        // Keep non-JSON failures readable.
+      }
+      if (response.status === 401 && path !== "/api/login" && path !== "/api/session") {
+        await handleExpiredSession();
+      }
+      if (!response.ok) {
+        const error = new Error(data.error || `Request failed (${response.status})`);
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    } catch (err) {
+      if (controller.signal.aborted) {
+        throw new Error("The server took too long to respond. Check your connection and try again.");
+      }
+      throw err;
+    } finally {
+      window.clearTimeout(timeout);
     }
-    if (!response.ok) {
-      const error = new Error(data.error || `Request failed (${response.status})`);
-      error.status = response.status;
-      throw error;
-    }
-    return data;
   }
   function toDate(value) {
     if (value === null || value === undefined || value === "") return null;
@@ -195,7 +211,7 @@
     const submit = node("button", "primary-button", "Sign in");
     submit.type = "submit";
     card.appendChild(submit);
-    card.appendChild(node("div", "auth-note", "This is a staff-only workspace. Do not enter Meta access tokens or app secrets here."));
+    card.appendChild(node("div", "auth-note", "Multiple employees can sign in at the same time using the same staff password on their own devices or browsers. Signing out here does not sign out other employees. Do not enter Meta access tokens or app secrets here."));
     card.addEventListener("submit", async (event) => {
       event.preventDefault();
       error.classList.add("hidden");

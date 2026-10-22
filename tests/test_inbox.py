@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
 import time
@@ -95,6 +96,42 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/status").status_code, 200)
         self.assertEqual(self.post("/api/logout", {}).status_code, 200)
         self.assertEqual(self.client.get("/api/conversations").status_code, 401)
+
+    def test_multiple_employees_share_password_with_independent_sessions(self):
+        self.receive()
+        employees = [self.app.test_client() for _ in range(3)]
+
+        def sign_in(client):
+            csrf = client.get("/api/session").json["csrf_token"]
+            result = client.post("/api/login",
+                                 json={"password": "test-staff-password-only"},
+                                 headers={"X-CSRF-Token": csrf})
+            self.assertEqual(result.status_code, 200)
+            return result.json["csrf_token"]
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            tokens = list(pool.map(sign_in, employees))
+        self.assertEqual(len(set(tokens)), 3)
+        for employee in employees:
+            self.assertTrue(employee.get("/api/session").json["authenticated"])
+            self.assertEqual(employee.get("/api/status").status_code, 200)
+            conversations = employee.get("/api/conversations")
+            self.assertEqual(conversations.status_code, 200)
+            self.assertEqual(len(conversations.json["conversations"]), 1)
+
+        # Tokens belong to each employee's own browser, even with one password.
+        self.assertEqual(employees[0].post("/api/logout", json={},
+                         headers={"X-CSRF-Token": tokens[1]}).status_code, 403)
+        self.assertEqual(employees[0].post("/api/logout", json={},
+                         headers={"X-CSRF-Token": tokens[0]}).status_code, 200)
+        self.assertEqual(employees[0].get("/api/conversations").status_code, 401)
+        for employee in employees[1:]:
+            self.assertEqual(employee.get("/api/conversations").status_code, 200)
+
+        # Signing in again must not replace anyone else's active session.
+        sign_in(employees[0])
+        for employee in employees:
+            self.assertTrue(employee.get("/api/session").json["authenticated"])
 
     def test_login_rate_limit(self):
         for _ in range(5):

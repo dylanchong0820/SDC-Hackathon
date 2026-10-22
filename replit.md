@@ -28,6 +28,14 @@ Never put credentials into Git, chat, the website's settings, or browser storage
 The website only accepts the staff password at sign-in. Changing that password
 invalidates older sessions after the app restarts.
 
+## Shared employee access
+
+Multiple employees must be able to use the inbox simultaneously with the same
+staff password. Each device/browser has an independent session and CSRF token;
+signing in or out on one must not disconnect other employees. All employees
+share the business inbox and permissions. Separate tabs in the same browser
+profile share that browser's session.
+
 ## Connecting Meta
 
 1. Add the secrets and restart the workflow.
