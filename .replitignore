@@ -1,0 +1,5 @@
+whatsapp_data/
+.env
+.pythonlibs/
+__pycache__/
+generated-artifacts/

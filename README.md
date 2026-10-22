@@ -1,6 +1,10 @@
-# Project Name
+# WhatsApp Desk
 
-> A one-sentence description of what your project does and who it is for.
+Staff-only WhatsApp Business inbox: receive and archive messages and attachments,
+view conversations, and send text replies from the business number.
+
+See [replit.md](replit.md) for the complete configuration, storage behavior,
+security requirements, tests, and deployment limitations.
 
 ---
 
@@ -95,10 +99,14 @@ User ──► Replit (App / API) ──► RunPod Endpoint (GPU model)
 ### Option 1 — Run on Replit (Recommended)
 
 1. Open the [Replit Project](https://replit.com/@your-username/your-project), or import this repository via **Create Repl → Import from GitHub**.
-2. Open the **Secrets** tab (🔒) and add the variables listed in `.env.example`:
-   - `RUNPOD_API_KEY`
-   - `RUNPOD_ENDPOINT_ID`
-3. Click **Run**. Replit uses the `.replit` file to start `python src/main.py`.
+2. Add `SESSION_SECRET`, `STAFF_PASSWORD` (12+ characters), `META_ACCESS_TOKEN`,
+   `WEBHOOK_VERIFY_TOKEN`, and `META_APP_SECRET` in Replit Secrets.
+3. Click **Run** to start `python src/server.py`, then sign in to the website.
+4. In Settings, enter the business **phone number ID** from Meta's WhatsApp API
+   Setup page. Configure the site's HTTPS URL plus `/webhook` in Meta and
+   subscribe to `messages` events.
+5. Ask a customer to message the business number, then reply from the website.
+   Free-form texts are available only during Meta's 24-hour reply window.
 
 ### Option 2 — Run Locally
 
@@ -114,11 +122,10 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 # 3. Install dependencies
 pip install -r requirements.txt
 
-# 4. Configure environment variables
-cp .env.example .env            # then fill in your values
+# 4. Configure the variables above in your local environment (or a private .env).
 
 # 5. Run the app
-python src/main.py
+python src/server.py
 ```
 
 ### Run Tests

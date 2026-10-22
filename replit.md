@@ -1,0 +1,86 @@
+# WhatsApp Desk
+
+The existing Python/Flask app now serves both the WhatsApp Cloud API webhook and
+the staff website. Keep the Python stack and the original local archive.
+
+## Running
+
+- Workflow: `Start application` → `python src/server.py`.
+- Listen on `0.0.0.0:5000`; website `/`, webhook `/webhook`, health `/health`.
+- Runtime dependencies: `requirements.txt`. Optional browser-test tooling:
+  `requirements-dev.txt`.
+- Tests: `python -m unittest discover -s tests -v`.
+- Browser smoke test: `python tests/browser_smoke.py` (Playwright and a Chromium
+  browser are required; see `CHROMIUM_PATH` in that script).
+
+## Replit Secrets
+
+- `SESSION_SECRET`: long random secret for signed staff sessions.
+- `STAFF_PASSWORD`: shared staff login password, at least 12 characters.
+- `META_ACCESS_TOKEN`: the existing Meta WhatsApp Cloud API access token with
+  WhatsApp messaging/management permissions.
+- `WEBHOOK_VERIFY_TOKEN`: matches the Verify token entered in Meta.
+- `META_APP_SECRET`: Meta App Dashboard → App settings → Basic → App secret.
+  Required to validate `X-Hub-Signature-256` on incoming POSTs. This is NOT the
+  verify token. Unsigned or incorrectly signed webhook events are rejected.
+
+Never put credentials into Git, chat, the website's settings, or browser storage.
+The website only accepts the staff password at sign-in. Changing that password
+invalidates older sessions after the app restarts.
+
+## Connecting Meta
+
+1. Add the secrets and restart the workflow.
+2. Sign in at `/`. Settings accepts the **phone number ID**, not the displayed
+   phone number. Find it in Meta App Dashboard → WhatsApp → API Setup.
+   The receiver also learns this ID automatically from inbound webhook metadata.
+3. Configure the public site's HTTPS origin + `/webhook` as the callback URL;
+   enter the same verify token as `WEBHOOK_VERIFY_TOKEN`. Subscribe the WhatsApp
+   Business Account to `messages` events and the app as needed in Meta.
+4. A customer sends a message to the business number. The website polls updates.
+   Meta's test-number recipient restrictions still apply if using a test number.
+
+The UI configuration indicators mean a value exists, not that Meta accepted or
+verified it. The app never imports historical messages from Meta: that API is
+send-only, and only future subscribed events reach this receiver.
+
+## Data and behavior
+
+- Original archive: `whatsapp_data/messages.txt`, append-only readable text.
+- Original attachment location: `whatsapp_data/attachments/<type>/`.
+- New SQLite index/job queue: `whatsapp_data/inbox.sqlite3`, beside the original
+  archive. Existing original-format text logs are indexed once without rewriting.
+- Incoming image/document/audio/video/sticker messages are queued immediately,
+  saved asynchronously, and retried up to three times. Failed downloads can be
+  retried from the website. PDFs and arbitrary WhatsApp-supported documents retain
+  their file extensions and names. Unique filenames avoid same-second overwrites.
+- Other types retain raw message content (contacts, location, reactions,
+  interactive replies, orders, system/future types). Raw payloads are staff-only.
+- Text sends: at most 4096 characters, only within the 24-hour customer-service
+  window since an inbound customer message. Starting an empty conversation does
+  not send anything or open that window. Approved-template sends are not part of
+  this website. Meta acceptance is shown separately from delivered/read.
+- Media routes require staff authentication, check archive path containment, and
+  download documents/untrusted content rather than execute it inline.
+- Direct Meta Graph requests use the existing secret and `requests`; the connected
+  integration's documented Python SDK was unavailable from the package registry.
+  Graph version defaults to `v23.0` (`META_GRAPH_VERSION` can override it).
+- No customer data is seeded into the real app. Tests use isolated temporary
+  directories, fake Meta clients and test-only credentials.
+
+## Production cautions
+
+The workflow still uses Flask's development server. A production WSGI server is a
+separate queued project task; when adding it, use `src.server:create_app()` as the
+factory. Download jobs use SQLite leases, allowing recovery after a crash.
+
+The archive and SQLite are workspace-local to preserve the original receiver's
+storage behavior. They are NOT an assurance of durable storage on a published
+instance. Before production use, configure persistent storage/App Storage plus a
+durable database and backup/retention policies. Do not deploy or commit private
+archives. `.gitignore` and `.replitignore` exclude `whatsapp_data/`.
+
+## Git scope
+
+Only push/delete branches on `origin` (the owner's fork). Treat any `upstream`
+remote as read-only. Do not alter the internal Replit backup remote.

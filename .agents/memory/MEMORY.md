@@ -1,0 +1,1 @@
+- [Receiver constraints](receiver-constraints.md) — preserve original file archives; Git writes target origin only, never upstream.
