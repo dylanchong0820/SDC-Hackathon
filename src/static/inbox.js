@@ -22,7 +22,7 @@
     mode: "inbox", search: "", drafts: new Map(), pendingSend: null, pollError: "",
     loadingMessages: false, sending: false, polling: false, lastStatusSuccess: 0,
     listError: "", initialMessagesLoaded: false, pollIssues: {}, handlingExpiredSession: false,
-    conversationRequestId: 0
+    conversationRequestId: 0, historyRevision: null, historyEpoch: 0
   };
   let refs = {};
   let pollTimer = null;
@@ -410,6 +410,8 @@
     const pill = node("span", `window-pill${windowIsOpen(conversation) ? "" : " closed"}`, windowIsOpen(conversation) ? "24h reply window open" : "Window closed");
     refs.windowPill = pill;
     actions.append(pill, button("Refresh conversation", "icon-button", "refresh", () => refreshMessages(true)));
+    actions.appendChild(button("Clear chat history", "danger-button", null,
+      () => showHistoryDeletion(conversation)));
     head.appendChild(actions);
     refs.main.appendChild(head);
     refs.pollNotice = node("div", "inline-error hidden");
@@ -665,6 +667,7 @@
     state.beforeSeq = null;
     state.loadingMessages = false;
     state.initialMessagesLoaded = false;
+    state.historyRevision = null;
     renderConversationList();
     renderInbox();
     await fetchMessages(true);
@@ -680,10 +683,15 @@
   async function fetchMessages(isInitial = false) {
     if (state.selectedId === null) return;
     const selectedId = state.selectedId;
+    const epoch = state.historyEpoch;
     const url = `/api/conversations/${encodeURIComponent(selectedId)}/messages`;
     try {
       const data = await request(url);
-      if (String(state.selectedId) !== String(selectedId)) return;
+      if (String(state.selectedId) !== String(selectedId) || epoch !== state.historyEpoch) return;
+      const revision = Number(data.history_revision || 0);
+      if (state.historyRevision !== null && revision < state.historyRevision) return;
+      if (state.historyRevision !== null && revision !== state.historyRevision) state.messages = [];
+      state.historyRevision = revision;
       const wasNearBottom = refs.messageScroll && (refs.messageScroll.scrollHeight - refs.messageScroll.scrollTop - refs.messageScroll.clientHeight < 90);
       const existing = new Map(state.messages.map((message) => [String(message.id), message]));
       for (const message of (data.messages || [])) existing.set(String(message.id), { ...existing.get(String(message.id)), ...message });
@@ -717,12 +725,17 @@
   async function loadOlder() {
     if (state.loadingMessages || !state.hasMore || state.beforeSeq === null) return;
     const conversationId = state.selectedId;
+    const epoch = state.historyEpoch;
     state.loadingMessages = true;
     const scroll = refs.messageScroll;
     const previousHeight = scroll ? scroll.scrollHeight : 0;
     try {
       const data = await request(`/api/conversations/${encodeURIComponent(conversationId)}/messages?before=${encodeURIComponent(state.beforeSeq)}`);
-      if (String(state.selectedId) !== String(conversationId)) return;
+      if (String(state.selectedId) !== String(conversationId) || epoch !== state.historyEpoch) return;
+      if (Number(data.history_revision || 0) !== state.historyRevision) {
+        await fetchMessages(true);
+        return;
+      }
       const known = new Set(state.messages.map((message) => String(message.id)));
       const earlier = (data.messages || []).filter((message) => !known.has(String(message.id)));
       state.messages = [...earlier, ...state.messages].sort((a, b) => Number(a.seq || 0) - Number(b.seq || 0));
@@ -1036,6 +1049,12 @@
         checks.appendChild(item);
       }
       page.appendChild(checks);
+      const cleanup = node("section", "settings-card history-controls");
+      cleanup.append(node("h3", "", "Delete local history"),
+        node("p", "", "Clear message history for every chat, optionally including saved attachments. This affects every employee. It does not delete messages from WhatsApp. Contacts, settings and the actual reply window are kept."));
+      cleanup.appendChild(button("Clear entire inbox history", "danger-button", null,
+        () => showHistoryDeletion()));
+      page.appendChild(cleanup);
     } catch (err) {
       loading.remove();
       const error = node("div", "inline-error", `Settings could not be loaded: ${err.message}`);
@@ -1045,6 +1064,86 @@
       page.appendChild(error);
     }
   }
+  function showHistoryDeletion(conversation = null) {
+    if (state.sending) {
+      toast("Wait for your message to finish sending before clearing history.", true);
+      return;
+    }
+    const dialog = node("dialog", "history-dialog");
+    dialog.setAttribute("aria-labelledby", "history-delete-title");
+    const form = node("form", "");
+    const title = node("h2", "", conversation ? "Clear this chat's history?" : "Clear the entire inbox history?");
+    title.id = "history-delete-title";
+    const target = conversation ? (conversation.name || conversation.wa_id) : "ALL chats";
+    form.append(title, node("p", "", `This permanently removes the local message history and readable log entries for ${target}, for every employee. This cannot be undone here and does not delete messages from WhatsApp. Pending attachment downloads are cancelled.`));
+    const attachmentLabel = node("label", "history-option");
+    const attachments = node("input", "");
+    attachments.type = "checkbox";
+    attachmentLabel.append(attachments, document.createTextNode("Also permanently delete saved attachments"));
+    form.append(attachmentLabel, node("p", "history-hint", "Leave unchecked to keep downloaded files in the archive folder. Their messages and download links will still be removed. A later cleanup can delete retained files. Contacts, settings and reply windows stay unchanged."));
+    const phrase = conversation ? "DELETE" : "DELETE ALL";
+    const label = node("label", "field-label", `Type ${phrase} to confirm`);
+    label.htmlFor = "history-confirmation";
+    const confirmation = node("input", "field-input");
+    confirmation.id = "history-confirmation";
+    confirmation.autocomplete = "off";
+    confirmation.required = true;
+    const error = node("p", "inline-error hidden");
+    error.setAttribute("role", "alert");
+    const actions = node("div", "state-actions");
+    const cancel = button("Cancel", "secondary-button", null, () => dialog.close());
+    const submit = node("button", "danger-button", "Delete history");
+    submit.type = "submit";
+    submit.disabled = true;
+    confirmation.addEventListener("input", () => { submit.disabled = confirmation.value !== phrase; });
+    actions.append(cancel, submit);
+    form.append(label, confirmation, error, actions);
+    dialog.appendChild(form);
+    let busy = false;
+    dialog.addEventListener("cancel", (event) => { if (busy) event.preventDefault(); });
+    dialog.addEventListener("close", () => dialog.remove());
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (busy || confirmation.value !== phrase) return;
+      busy = true;
+      submit.disabled = cancel.disabled = attachments.disabled = confirmation.disabled = true;
+      submit.textContent = "Deleting…";
+      error.classList.add("hidden");
+      try {
+        const url = conversation ? `/api/conversations/${encodeURIComponent(conversation.id)}/history` : "/api/history";
+        const result = await request(url, { method: "DELETE",
+          body: { confirmation: phrase, delete_attachments: attachments.checked } });
+        state.historyEpoch += 1;
+        if (!conversation || String(state.selectedId) === String(conversation.id)) {
+          state.messages = [];
+          state.historyRevision = null;
+          state.initialMessagesLoaded = false;
+          state.hasMore = false;
+          state.beforeSeq = null;
+          state.pendingSend = null;
+        }
+        dialog.close();
+        await refreshConversations();
+        if (state.mode === "inbox") {
+          renderInbox();
+          await fetchMessages(true);
+        }
+        toast(`Deleted ${result.deleted_messages} messages. ${result.attachments_kept ? "Saved attachment files kept." : `${result.deleted_attachments} attachment files deleted.`}`);
+      } catch (err) {
+        error.textContent = err.status ? err.message :
+          "The deletion result could not be confirmed. Refresh the inbox before retrying. " + err.message;
+        error.classList.remove("hidden");
+      } finally {
+        busy = false;
+        submit.disabled = cancel.disabled = attachments.disabled = confirmation.disabled = false;
+        submit.textContent = "Delete history";
+      }
+    });
+    document.body.appendChild(dialog);
+    dialog.showModal();
+    confirmation.focus();
+  }
+
   function renderChecklist() {
     const page = pageHeading("Go-live readiness", "Configuration checklist", "A precise checklist for receiving customer messages and keeping attachments safe. No secrets are displayed here.");
     const steps = [

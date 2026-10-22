@@ -121,11 +121,54 @@ def run():
                 page.get_by_role("button", name="Save default", exact=True).click()
                 page.screenshot(path=str(outputs / "mobile.png"), full_page=True, animations="disabled")
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), "Mobile page overflows"
+                # A second employee must drop cached messages when another clears history.
+                colleague_context = browser.new_context(viewport={"width": 1280, "height": 800})
+                colleague = colleague_context.new_page()
+                colleague.on("pageerror", lambda error: errors.append(str(error)))
+                colleague.goto(url)
+                colleague.get_by_label("Staff password", exact=True).fill("isolated-browser-test-password")
+                colleague.get_by_role("button", name="Sign in", exact=True).click()
+                colleague.get_by_text("Browser Test Contact", exact=True).first.click()
+                expect(colleague.get_by_text("Can you review the attached documents?", exact=True)).to_be_visible()
+
+                page.set_viewport_size({"width": 1280, "height": 800})
+                page.get_by_role("button", name="Back to inbox", exact=True).click()
+                page.get_by_role("button", name="Clear chat history", exact=True).click()
+                dialog = page.get_by_role("dialog")
+                expect(dialog.get_by_role("button", name="Delete history", exact=True)).to_be_disabled()
+                dialog.get_by_role("button", name="Cancel", exact=True).click()
+                expect(page.get_by_text("Can you review the attached documents?", exact=True)).to_be_visible()
+                page.get_by_role("button", name="Clear chat history", exact=True).click()
+                expect(dialog.get_by_label("Also permanently delete saved attachments")).not_to_be_checked()
+                dialog.get_by_label("Type DELETE to confirm", exact=True).fill("DELETE")
+                page.screenshot(path=str(outputs / "delete-chat.png"), full_page=True, animations="disabled")
+                saved_files = [Path(row["attachment_path"]) for row in
+                               [store.message("wamid.browser-image"), store.message("wamid.browser-document")]]
+                dialog.get_by_role("button", name="Delete history", exact=True).click()
+                expect(dialog).not_to_be_visible()
+                expect(page.get_by_text("Can you review the attached documents?", exact=True)).to_have_count(0)
+                assert all(path.exists() for path in saved_files), "Unchecked option must retain files"
+                expect(colleague.get_by_text("Can you review the attached documents?", exact=True)).to_have_count(0, timeout=12000)
+                assert store.log_path.read_text() == "", "Deleted content must leave the readable archive"
+
+                # Entire-inbox cleanup can remove the previously retained files.
+                page.get_by_role("button", name="Settings", exact=True).click()
+                page.get_by_role("button", name="Clear entire inbox history", exact=True).click()
+                page.set_viewport_size({"width": 390, "height": 844})
+                dialog.get_by_label("Also permanently delete saved attachments").check()
+                dialog.get_by_label("Type DELETE ALL to confirm", exact=True).fill("DELETE ALL")
+                page.screenshot(path=str(outputs / "delete-all-mobile.png"), full_page=True, animations="disabled")
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), "Deletion dialog overflows"
+                dialog.get_by_role("button", name="Delete history", exact=True).click()
+                expect(dialog).not_to_be_visible()
+                assert not any(path.exists() for path in saved_files), "Checked option must remove files"
+                assert not store.messages(store.conversations()[0]["id"])["messages"]
+                colleague_context.close()
                 assert not errors, f"Browser errors: {errors}"
                 browser.close()
         finally:
             server.shutdown()
-        print("Browser smoke passed: login, media, real send path (fake Meta), drafts, settings, responsive layout.")
+        print("Browser smoke passed: login, media, fake-Meta sends, drafts, settings, chat/all deletion, attachment choices, colleague cache refresh, responsive dialogs.")
         print("Screenshots in generated-artifacts/browser-check (isolated fixture data only).")
 
 

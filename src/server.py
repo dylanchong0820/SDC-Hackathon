@@ -241,6 +241,26 @@ def create_app(config=None):
             row = store.finish_outgoing(row["id"], error=str(error))
         return jsonify(message=store.public_message(row)), 201
 
+    @app.delete("/api/history")
+    @app.delete("/api/conversations/<int:conversation_id>/history")
+    @require_staff
+    def clear_history(conversation_id=None):
+        data = json_body()
+        expected = "DELETE ALL" if conversation_id is None else "DELETE"
+        if data.get("confirmation") != expected:
+            return jsonify(error=f"Type {expected} to confirm permanent history deletion."), 400
+        if not isinstance(data.get("delete_attachments"), bool):
+            return jsonify(error="Choose whether to also delete saved attachments."), 400
+        try:
+            result = store.clear_history(conversation_id, data["delete_attachments"])
+        except LookupError as error:
+            return jsonify(error=str(error)), 404
+        except ValueError as error:
+            return jsonify(error=str(error)), 409
+        except OSError:
+            return jsonify(error="Storage cleanup could not finish. Some files may already have been removed. Please retry."), 503
+        return jsonify(ok=True, **result)
+
     @app.get("/api/media/<path:message_id>")
     @require_staff
     def media(message_id):

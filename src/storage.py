@@ -18,7 +18,7 @@ class Store:
         self.attachments.mkdir(parents=True, exist_ok=True)
         self.log_path = self.root / "messages.txt"
         self.db_path = self.root / "inbox.sqlite3"
-        self.log_lock = threading.Lock()
+        self.log_lock = threading.RLock()
         with self.db() as db:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
@@ -51,10 +51,18 @@ class Store:
                 CREATE TABLE IF NOT EXISTS delivery (
                     id TEXT PRIMARY KEY, status TEXT, timestamp INTEGER, error TEXT
                 );
+                CREATE TABLE IF NOT EXISTS deleted_messages (id TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS deleted_requests (client_id TEXT PRIMARY KEY);
+                CREATE TABLE IF NOT EXISTS retained_attachments (
+                    path TEXT PRIMARY KEY, conversation_id INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS login_attempts (
                     identity TEXT, timestamp INTEGER
                 );
             """)
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(conversations)")}
+            if "history_revision" not in columns:
+                db.execute("ALTER TABLE conversations ADD COLUMN history_revision INTEGER NOT NULL DEFAULT 0")
         self.import_legacy()
 
     @contextmanager
@@ -154,15 +162,22 @@ class Store:
 
     def messages(self, conversation_id, before=None):
         with self.db() as db:
+            db.execute("BEGIN")
+            conversation = db.execute("SELECT history_revision FROM conversations WHERE id=?",
+                                      (conversation_id,)).fetchone()
             rows = db.execute(
                 "SELECT * FROM messages WHERE conversation_id=? AND seq<? "
                 "ORDER BY seq DESC LIMIT 101",
                 (conversation_id, before or 9223372036854775807)).fetchall()
         return {"messages": [self.public_message(dict(r)) for r in reversed(rows[:100])],
-                "has_more": len(rows) > 100}
+                "has_more": len(rows) > 100,
+                "history_revision": conversation["history_revision"] if conversation else 0}
 
     def insert_inbound(self, conversation_id, record):
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM deleted_messages WHERE id=?", (record["id"],)).fetchone():
+                return False
             result = db.execute("""
                 INSERT OR IGNORE INTO messages
                 (id,platform_id,conversation_id,direction,type,body,caption,timestamp,
@@ -187,8 +202,8 @@ class Store:
         self.log_message(self.message(record["id"]))
         return True
 
-    def log_message(self, row):
-        conversation = self.conversation(row["conversation_id"])
+    def format_log_message(self, row, conversation=None):
+        conversation = conversation or self.conversation(row["conversation_id"])
         date = datetime.fromtimestamp(row["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
         label = "From" if row["direction"] == "inbound" else "To"
         prefix = f"[{date}] {label}: {conversation['wa_id']} | Type: {row['type']} | "
@@ -203,15 +218,29 @@ class Store:
         # Keep the original text-log format. Escape embedded newlines so a
         # customer's text cannot forge a second log record.
         detail = detail.replace("\r", "\\r").replace("\n", "\\n")
+        return prefix + detail + "\n"
+
+    def log_message(self, row):
         with self.log_lock:
+            if not row or not self.message(row["id"]):
+                return
             with self.log_path.open("a", encoding="utf-8") as handle:
-                handle.write(prefix + detail + "\n")
+                handle.write(self.format_log_message(row))
+
+    def clear_history(self, conversation_id=None, delete_attachments=False):
+        try:
+            from .history import clear_history
+        except ImportError:
+            from history import clear_history
+        return clear_history(self, conversation_id, delete_attachments)
 
     def new_outgoing(self, conversation, body, client_id):
         message_id = "out_" + uuid.uuid4().hex
         now = int(time.time())
         with self.db() as db:
             db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM deleted_requests WHERE client_id=?", (client_id,)).fetchone():
+                raise ValueError("This message's history was deleted. Start a new send request.")
             existing = db.execute("SELECT * FROM messages WHERE client_id=?", (client_id,)).fetchone()
             if existing:
                 if existing["conversation_id"] != conversation["id"] or existing["body"] != body:
@@ -234,8 +263,10 @@ class Store:
                     status, error = prior["status"], prior["error"]
             db.execute("UPDATE messages SET platform_id=?,status=?,error=? WHERE id=?",
                        (platform_id, status, error, message_id))
-        self.log_message(self.message(message_id))
-        return self.message(message_id)
+            row = db.execute("SELECT * FROM messages WHERE id=?", (message_id,)).fetchone()
+            result = dict(row) if row else None
+        self.log_message(result)
+        return result
 
     def delivery_status(self, payload):
         status = payload.get("status")
@@ -246,6 +277,9 @@ class Store:
                           for e in payload.get("errors", []) if isinstance(e, dict)) or None
         ranks = {"accepted": 0, "sent": 1, "delivered": 2, "read": 3, "failed": 4}
         with self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM deleted_messages WHERE id=?", (payload["id"],)).fetchone():
+                return
             previous = db.execute("SELECT * FROM delivery WHERE id=?", (payload["id"],)).fetchone()
             if previous and (previous["timestamp"] > timestamp or
                              ranks.get(previous["status"], 0) > ranks[status]):
@@ -275,12 +309,18 @@ class Store:
         return result
 
     def media_saved(self, row, path, mime, filename):
-        with self.db() as db:
-            db.execute("""
-                UPDATE messages SET attachment_path=?,mime_type=?,filename=?,
-                attachment_state='saved',attachment_error=NULL WHERE id=?
-            """, (str(path), mime, filename, row["id"]))
         with self.log_lock:
+            with self.db() as db:
+                result = db.execute("""
+                    UPDATE messages SET attachment_path=?,mime_type=?,filename=?,
+                    attachment_state='saved',attachment_error=NULL WHERE id=?
+                """, (str(path), mime, filename, row["id"]))
+            if not result.rowcount:
+                # A clear-history action cancelled this job while it downloaded.
+                candidate = Path(path).resolve()
+                if candidate.is_relative_to(self.attachments) and candidate.is_file():
+                    candidate.unlink()
+                return
             with self.log_path.open("a", encoding="utf-8") as handle:
                 handle.write(f"[ATTACHMENT] Message: {row['id']} | Saved: {path}\n")
 

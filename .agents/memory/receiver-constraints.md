@@ -4,11 +4,13 @@ description: User-required archive behavior and Git remote write boundaries.
 ---
 
 Preserve readable text message logs and downloaded attachments as product
-features; a searchable database is an additional index, not a replacement for
-the original file archive.
+features, except when an employee explicitly confirms history deletion.
+A searchable database is an additional index, not a replacement for the archive.
 
 **Why:** The user explicitly asked to save incoming WhatsApp messages as their
-original code did while adding an employer-facing website.
+original code did while adding an employer-facing website. They later explicitly
+requested employee-controlled deletion for individual chats and the whole inbox,
+with an option to include attachments.
 
 **How to apply:** Keep archive behavior when extending or changing storage, and
 explain deployment durability limits rather than quietly discarding local files.

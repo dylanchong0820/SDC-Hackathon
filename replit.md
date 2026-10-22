@@ -75,6 +75,11 @@ send-only, and only future subscribed events reach this receiver.
   Graph version defaults to `v23.0` (`META_GRAPH_VERSION` can override it).
 - No customer data is seeded into the real app. Tests use isolated temporary
   directories, fake Meta clients and test-only credentials.
+- Employees may explicitly clear a single chat's history or the entire inbox,
+  with typed confirmation and optional attachment-file deletion. This affects
+  all staff, not WhatsApp's own messages. Keeping attachments preserves files
+  without inbox links; a later cleanup can remove them. Contacts/settings and
+  the real reply window are kept. Do not delete live data during testing.
 
 ## Production cautions
 
