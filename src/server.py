@@ -16,10 +16,10 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.serving import WSGIRequestHandler
 
 if __package__:
-    from .storage import Store
+    from .storage import Store, StorageBusyError
     from .whatsapp import GraphClient, GraphError, MediaWorker, process_event
 else:
-    from storage import Store
+    from storage import Store, StorageBusyError
     from whatsapp import GraphClient, GraphError, MediaWorker, process_event
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -121,6 +121,13 @@ def create_app(config=None):
         if request.path.startswith("/api/") or request.path == "/webhook":
             return jsonify(error=error.description), error.code
         return error
+
+    @app.errorhandler(StorageBusyError)
+    def storage_busy(error):
+        response = jsonify(error=str(error))
+        response.status_code = 503
+        response.headers["Retry-After"] = "5"
+        return response
 
     @app.route("/")
     def index():

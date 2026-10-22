@@ -80,6 +80,10 @@ send-only, and only future subscribed events reach this receiver.
   all staff, not WhatsApp's own messages. Keeping attachments preserves files
   without inbox links; a later cleanup can remove them. Contacts/settings and
   the real reply window are kept. Do not delete live data during testing.
+- SQLite connection lifecycles are serialized within each server process to
+  prevent runtime open/close mutex stalls under concurrent staff/media access.
+  Busy archives return HTTP 503 with Retry-After instead of waiting indefinitely.
+  Never hold a database context around network requests or attachment downloads.
 
 ## Production cautions
 

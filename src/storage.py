@@ -11,6 +11,17 @@ import time
 import uuid
 
 
+# Serialize the complete connection lifecycle, not just writes. Concurrent
+# open/close calls have stalled in the runtime's SQLite inode/FD-list mutex.
+# Keep network requests and file downloads outside this critical section.
+_SQLITE_LOCK = threading.RLock()
+SQLITE_WAIT_SECONDS = 5
+
+
+class StorageBusyError(RuntimeError):
+    """The archive is busy; the caller may safely retry later."""
+
+
 class Store:
     def __init__(self, data_dir):
         self.root = Path(data_dir).resolve()
@@ -67,14 +78,23 @@ class Store:
 
     @contextmanager
     def db(self):
-        connection = sqlite3.connect(self.db_path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
+        if not _SQLITE_LOCK.acquire(timeout=SQLITE_WAIT_SECONDS):
+            raise StorageBusyError("The inbox archive is busy. Please try again shortly.")
         try:
-            with connection:
-                yield connection
+            connection = sqlite3.connect(self.db_path, timeout=SQLITE_WAIT_SECONDS)
+            try:
+                connection.row_factory = sqlite3.Row
+                connection.execute("PRAGMA foreign_keys=ON")
+                with connection:
+                    yield connection
+            finally:
+                connection.close()
+        except sqlite3.OperationalError as error:
+            if "locked" in str(error).lower() or "busy" in str(error).lower():
+                raise StorageBusyError("The inbox archive is busy. Please try again shortly.") from error
+            raise
         finally:
-            connection.close()
+            _SQLITE_LOCK.release()
 
     def setting(self, key, default=""):
         with self.db() as db:
