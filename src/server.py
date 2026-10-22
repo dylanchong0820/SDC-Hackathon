@@ -14,7 +14,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 # --- CONFIGURATION ---
-VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "my_custom_webhook_secret_123")
+VERIFY_TOKEN = os.getenv("WEBHOOK_VERIFY_TOKEN")
+if not VERIFY_TOKEN:
+    raise RuntimeError("WEBHOOK_VERIFY_TOKEN must be configured in Replit Secrets.")
 ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN", "")
 LOG_FILE = "messages.txt"
 BASE_ATTACHMENT_DIR = "attachments"
