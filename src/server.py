@@ -18,10 +18,12 @@ from werkzeug.utils import secure_filename
 
 if __package__:
     from .history_import import HistoryImportError, parse_whatsapp_export
+    from .quote_analysis import QuoteAnalysisWorker
     from .storage import Store, StorageBusyError
     from .whatsapp import GraphClient, GraphError, MediaWorker, process_event
 else:
     from history_import import HistoryImportError, parse_whatsapp_export
+    from quote_analysis import QuoteAnalysisWorker
     from storage import Store, StorageBusyError
     from whatsapp import GraphClient, GraphError, MediaWorker, process_event
 
@@ -38,6 +40,9 @@ def create_app(config=None):
         META_APP_SECRET=os.getenv("META_APP_SECRET", ""),
         META_ACCESS_TOKEN=os.getenv("META_ACCESS_TOKEN", ""),
         META_GRAPH_VERSION=os.getenv("META_GRAPH_VERSION", "v23.0"),
+        RUNPOD_API_KEY=os.getenv("RUNPOD_API_KEY", ""),
+        RUNPOD_ENDPOINT_URL=os.getenv(
+            "RUNPOD_ENDPOINT_URL", "https://by40gb92whagr1.api.runpod.ai"),
         DATA_DIR=PROJECT_ROOT / "whatsapp_data",
         MEDIA_WORKER=True,
         MAX_CONTENT_LENGTH=9 * 1024 * 1024,
@@ -53,6 +58,11 @@ def create_app(config=None):
         app.config["META_ACCESS_TOKEN"], app.config["META_GRAPH_VERSION"])
     app.extensions["store"] = store
     app.extensions["graph"] = graph
+    quote_worker = app.config.get("QUOTE_WORKER")
+    if quote_worker is None:
+        quote_worker = QuoteAnalysisWorker(
+            store, app.config["RUNPOD_ENDPOINT_URL"], app.config["RUNPOD_API_KEY"])
+    app.extensions["quote_worker"] = quote_worker
     if os.getenv("WHATSAPP_PHONE_NUMBER_ID") and not store.setting("phone_number_id"):
         store.learn_phone(os.environ["WHATSAPP_PHONE_NUMBER_ID"])
     if app.config["MEDIA_WORKER"] and not app.config.get("TESTING"):
@@ -346,6 +356,64 @@ def create_app(config=None):
         if not store.retry_media(message_id):
             return jsonify(error="Only failed attachment downloads can be retried."), 409
         return jsonify(ok=True)
+
+    @app.get("/api/quote-candidates")
+    @require_staff
+    def quote_candidates():
+        raw_conversation_id = request.args.get("conversation_id")
+        conversation_id = request.args.get("conversation_id", type=int)
+        if raw_conversation_id is not None:
+            if conversation_id is None or conversation_id < 1:
+                return jsonify(error="Conversation ID is invalid."), 400
+            if not store.conversation(conversation_id):
+                return jsonify(error="Conversation not found."), 404
+        return jsonify(candidates=store.quote_candidates(conversation_id))
+
+    @app.get("/api/quote-evaluations")
+    @require_staff
+    def quote_evaluations():
+        return jsonify(evaluations=store.quote_evaluations())
+
+    @app.post("/api/quote-evaluations")
+    @require_staff
+    def create_quote_evaluation():
+        data = json_body()
+        try:
+            evaluation = store.create_quote_evaluation(
+                data.get("message_ids"), data.get("priority"))
+        except ValueError as error:
+            return jsonify(error=str(error)), 400
+        try:
+            app.extensions["quote_worker"].submit(evaluation["id"])
+        except Exception:
+            store.update_quote_evaluation(
+                evaluation["id"], "failed",
+                error="The analysis could not be queued. The original messages and files are unchanged.")
+            return jsonify(error="The analysis could not be queued. Please try again."), 503
+        return jsonify(evaluation=store.quote_evaluation(evaluation["id"])), 202
+
+    @app.get("/api/quote-evaluations/<int:evaluation_id>")
+    @require_staff
+    def get_quote_evaluation(evaluation_id):
+        evaluation = store.quote_evaluation(evaluation_id)
+        if not evaluation:
+            return jsonify(error="Quote comparison not found. It may have been removed with chat history."), 404
+        return jsonify(evaluation=evaluation)
+
+    @app.post("/api/quote-evaluations/<int:evaluation_id>/selection")
+    @require_staff
+    def select_quote(evaluation_id):
+        data = json_body()
+        message_id = data.get("message_id")
+        if not isinstance(message_id, str) or not message_id:
+            return jsonify(error="Choose a quotation from this comparison."), 400
+        try:
+            evaluation = store.select_quote(evaluation_id, message_id)
+        except ValueError as error:
+            return jsonify(error=str(error)), 409
+        if not evaluation:
+            return jsonify(error="Quote comparison not found. It may have been removed with chat history."), 404
+        return jsonify(evaluation=evaluation)
 
     @app.get("/api/settings")
     @require_staff

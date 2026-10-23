@@ -71,10 +71,49 @@ class Store:
                 CREATE TABLE IF NOT EXISTS login_attempts (
                     identity TEXT, timestamp INTEGER
                 );
+                CREATE TABLE IF NOT EXISTS quote_evaluations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL,
+                    priority TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    selected_message_id TEXT,
+                    error TEXT DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS quote_evaluation_sources (
+                    evaluation_id INTEGER NOT NULL
+                        REFERENCES quote_evaluations(id) ON DELETE CASCADE,
+                    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                    conversation_id INTEGER NOT NULL
+                        REFERENCES conversations(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL,
+                    PRIMARY KEY (evaluation_id, message_id),
+                    UNIQUE (evaluation_id, position)
+                );
+                CREATE INDEX IF NOT EXISTS quote_sources_message
+                    ON quote_evaluation_sources(message_id);
+                CREATE INDEX IF NOT EXISTS quote_evaluations_recent
+                    ON quote_evaluations(created_at DESC);
+                CREATE TRIGGER IF NOT EXISTS delete_quote_evaluations_with_history
+                BEFORE DELETE ON messages
+                BEGIN
+                    DELETE FROM quote_evaluations
+                    WHERE id IN (
+                        SELECT evaluation_id FROM quote_evaluation_sources
+                        WHERE message_id=OLD.id
+                    );
+                END;
             """)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(conversations)")}
             if "history_revision" not in columns:
                 db.execute("ALTER TABLE conversations ADD COLUMN history_revision INTEGER NOT NULL DEFAULT 0")
+            db.execute("""
+                UPDATE quote_evaluations
+                SET status='failed', error='The server restarted before analysis finished.',
+                    updated_at=?
+                WHERE status IN ('queued','processing')
+            """, (int(time.time()),))
         self.import_legacy()
 
     @contextmanager
@@ -163,6 +202,186 @@ class Store:
                 ORDER BY last_message_at DESC, id DESC LIMIT 500
             """, (f"%{search}%", f"%{search}%")).fetchall()
         return [self.conversation(row["id"]) for row in rows]
+
+    def quote_candidates(self, conversation_id=None, limit=500):
+        query = """
+            SELECT m.*,c.name AS client_name,c.wa_id
+            FROM messages m JOIN conversations c ON c.id=m.conversation_id
+            WHERE m.direction='inbound'
+              AND (trim(m.body)<>'' OR trim(m.caption)<>'' OR m.media_id IS NOT NULL
+                   OR m.attachment_path IS NOT NULL)
+        """
+        params = []
+        if conversation_id is not None:
+            query += " AND m.conversation_id=?"
+            params.append(conversation_id)
+        query += " ORDER BY m.timestamp DESC,m.seq DESC LIMIT ?"
+        params.append(max(1, min(int(limit), 500)))
+        with self.db() as db:
+            rows = [dict(row) for row in db.execute(query, params).fetchall()]
+
+        candidates = []
+        from urllib.parse import quote
+        for row in rows:
+            path = self.media_path(row)
+            is_text = row["type"] == "text" and bool((row["body"] or "").strip())
+            ready = is_text or path is not None
+            size = None
+            if path:
+                try:
+                    size = path.stat().st_size
+                except OSError:
+                    ready = is_text
+            candidates.append({
+                "id": row["id"],
+                "conversation_id": row["conversation_id"],
+                "client_name": row["client_name"] or row["wa_id"],
+                "wa_id": row["wa_id"],
+                "type": row["type"],
+                "body": row["body"] or "",
+                "caption": row["caption"] or "",
+                "filename": row["filename"] or "",
+                "mime_type": row["mime_type"] or "",
+                "timestamp": row["timestamp"],
+                "attachment_state": row["attachment_state"],
+                "ready": ready,
+                "media_url": ("/api/media/" + quote(row["id"], safe="") if path else None),
+                "attachment_size": size,
+            })
+        return candidates
+
+    def create_quote_evaluation(self, message_ids, priority):
+        if priority not in {"price", "time", "balanced"}:
+            raise ValueError("Choose price, delivery time, or balanced comparison.")
+        if not isinstance(message_ids, list) or not 1 <= len(message_ids) <= 8:
+            raise ValueError("Select between 1 and 8 client messages or attachments.")
+        ids = []
+        for message_id in message_ids:
+            if not isinstance(message_id, str) or not message_id or len(message_id) > 200:
+                raise ValueError("A selected message ID is invalid.")
+            if message_id not in ids:
+                ids.append(message_id)
+        if not ids:
+            raise ValueError("Select at least one client message or attachment.")
+
+        placeholders = ",".join("?" for _ in ids)
+        with self.db() as db:
+            rows = db.execute(f"""
+                SELECT id,conversation_id,direction,type,body,caption,attachment_state,
+                       attachment_path,media_id
+                FROM messages WHERE id IN ({placeholders})
+            """, ids).fetchall()
+            by_id = {row["id"]: dict(row) for row in rows}
+            if len(by_id) != len(ids):
+                raise ValueError("One or more selected messages are no longer available.")
+
+            for message_id in ids:
+                row = by_id[message_id]
+                if row["direction"] != "inbound":
+                    raise ValueError("Only client messages can be compared.")
+                if row["type"] == "text" and (row["body"] or "").strip():
+                    continue
+                attachment = self.media_path(row)
+                if not attachment:
+                    raise ValueError("A selected attachment is not saved yet or is no longer available.")
+
+            now = int(time.time())
+            cursor = db.execute("""
+                INSERT INTO quote_evaluations(created_at,updated_at,priority,status)
+                VALUES (?,?,?,'queued')
+            """, (now, now, priority))
+            evaluation_id = cursor.lastrowid
+            db.executemany("""
+                INSERT INTO quote_evaluation_sources
+                    (evaluation_id,message_id,conversation_id,position)
+                VALUES (?,?,?,?)
+            """, [(evaluation_id, message_id, by_id[message_id]["conversation_id"], position)
+                  for position, message_id in enumerate(ids)])
+        return self.quote_evaluation(evaluation_id)
+
+    def quote_evaluation_inputs(self, evaluation_id):
+        with self.db() as db:
+            evaluation = db.execute(
+                "SELECT id,priority,status FROM quote_evaluations WHERE id=?",
+                (evaluation_id,)).fetchone()
+            if not evaluation:
+                return None
+            rows = db.execute("""
+                SELECT m.*,c.name AS client_name,c.wa_id
+                FROM quote_evaluation_sources s
+                JOIN messages m ON m.id=s.message_id
+                JOIN conversations c ON c.id=s.conversation_id
+                WHERE s.evaluation_id=? ORDER BY s.position
+            """, (evaluation_id,)).fetchall()
+        return {"evaluation": dict(evaluation), "messages": [dict(row) for row in rows]}
+
+    def update_quote_evaluation(self, evaluation_id, status, result=None, error=None):
+        if status not in {"queued", "processing", "completed", "failed"}:
+            raise ValueError("Invalid quote evaluation status.")
+        with self.db() as db:
+            if result is None:
+                db.execute("""
+                    UPDATE quote_evaluations SET status=?,error=?,updated_at=? WHERE id=?
+                """, (status, str(error or "")[:1200], int(time.time()), evaluation_id))
+            else:
+                db.execute("""
+                    UPDATE quote_evaluations
+                    SET status=?,result_json=?,error=?,updated_at=? WHERE id=?
+                """, (status, json.dumps(result, ensure_ascii=False),
+                      str(error or "")[:1200], int(time.time()), evaluation_id))
+            exists = db.execute(
+                "SELECT 1 FROM quote_evaluations WHERE id=?", (evaluation_id,)).fetchone()
+        return self.quote_evaluation(evaluation_id) if exists else None
+
+    def quote_evaluation(self, evaluation_id):
+        with self.db() as db:
+            row = db.execute(
+                "SELECT * FROM quote_evaluations WHERE id=?", (evaluation_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        try:
+            result["result"] = json.loads(result.pop("result_json") or "{}")
+        except (TypeError, ValueError):
+            result["result"] = {}
+            result.pop("result_json", None)
+        return result
+
+    def quote_evaluations(self, limit=20):
+        with self.db() as db:
+            rows = db.execute("""
+                SELECT * FROM quote_evaluations
+                ORDER BY created_at DESC,id DESC LIMIT ?
+            """, (max(1, min(int(limit), 50)),)).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["result"] = json.loads(item.pop("result_json") or "{}")
+            except (TypeError, ValueError):
+                item["result"] = {}
+                item.pop("result_json", None)
+            result.append(item)
+        return result
+
+    def select_quote(self, evaluation_id, message_id):
+        with self.db() as db:
+            evaluation = db.execute(
+                "SELECT status FROM quote_evaluations WHERE id=?", (evaluation_id,)).fetchone()
+            if not evaluation:
+                return None
+            if evaluation["status"] != "completed":
+                raise ValueError("Wait for the comparison to finish before choosing a quotation.")
+            source = db.execute("""
+                SELECT 1 FROM quote_evaluation_sources
+                WHERE evaluation_id=? AND message_id=?
+            """, (evaluation_id, message_id)).fetchone()
+            if not source:
+                raise ValueError("Choose one of the quotations in this comparison.")
+            db.execute("""
+                UPDATE quote_evaluations SET selected_message_id=?,updated_at=? WHERE id=?
+            """, (message_id, int(time.time()), evaluation_id))
+        return self.quote_evaluation(evaluation_id)
 
     def message(self, message_id):
         with self.db() as db:

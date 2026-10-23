@@ -158,8 +158,8 @@
     const mark = node("span", "brand-mark");
     mark.appendChild(icon("chat"));
     const name = node("span", "brand-name");
-    name.appendChild(document.createTextNode("WhatsApp "));
-    const accent = node("span", "", "Desk");
+    name.appendChild(document.createTextNode("Quote Bot "));
+    const accent = node("span", "", "AI");
     name.appendChild(accent);
     const wrapper = node("div", "brand");
     wrapper.append(mark, name);
@@ -274,6 +274,10 @@
       right.appendChild(refs.lastEvent);
     }
     right.append(connection);
+    const quotes = button("Compare quotations", "icon-button quote-button", "list",
+      () => setMode("quotes"));
+    quotes.title = "Compare client quotations";
+    right.appendChild(quotes);
     right.appendChild(button("Configuration checklist", "icon-button", "list", () => setMode("checklist")));
     right.appendChild(button("Settings", "icon-button", "settings", () => setMode("settings")));
     const logout = node("button", "quiet-button", "Sign out");
@@ -1048,6 +1052,10 @@
     pollTimer = window.setInterval(poll, 5000);
   }
   function setMode(mode) {
+    if (mode !== "quotes" && window.QuoteEvaluator &&
+        typeof window.QuoteEvaluator.unmount === "function") {
+      window.QuoteEvaluator.unmount();
+    }
     state.mode = mode;
     if (!refs.main) return;
     if (mode !== "inbox") refs.workspace.classList.add("chat-open");
@@ -1055,6 +1063,15 @@
     else if (mode === "settings") renderSettings();
     else if (mode === "new") renderNewConversation();
     else if (mode === "checklist") renderChecklist();
+    else if (mode === "quotes") {
+      if (window.QuoteEvaluator && typeof window.QuoteEvaluator.mount === "function") {
+        window.QuoteEvaluator.mount({
+          container: refs.main, request, toast, onBack: () => setMode("inbox")
+        });
+      } else {
+        refs.main.replaceChildren(node("div", "inline-error", "The quotation comparison screen could not load. Refresh the page and try again."));
+      }
+    }
   }
   function pageHeading(kicker, title, intro) {
     refs.main.replaceChildren();

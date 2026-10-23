@@ -1,7 +1,29 @@
-# WhatsApp Desk
+# Quote Bot AI
 
-Staff-only WhatsApp Business inbox: receive and archive messages and attachments,
-view conversations, and send text replies from the business number.
+Staff-only WhatsApp Business inbox and quotation assistant: receive and archive
+messages and attachments, compare selected quotations with AI, record the team's
+choice, and send text replies from the business number.
+
+## Quote comparison
+
+In the staff inbox, choose **Compare quotations**, select up to eight incoming
+messages or saved attachments, and set the priority to price, delivery time, or
+both equally. Only those selected sources are sent to RunPod. Results are saved
+for staff to review, but the app never accepts a quotation or sends a reply
+automatically. Clearing source message history also removes its saved comparison.
+
+Set `RUNPOD_API_KEY` in Replit Secrets. The app discovers the served model from
+the configured endpoint's OpenAI-compatible `/v1/models` route; the endpoint
+must also support `/v1/chat/completions`. `RUNPOD_ENDPOINT_URL` can override the
+project's configured endpoint. Use an endpoint model that accepts the image and
+audio inputs you intend to analyze.
+
+Analysis supports incoming text, JPEG/PNG/WebP images, OGG/MP3/WAV/M4A/AAC/FLAC
+audio, TXT/Markdown/CSV/RTF, DOC/DOCX, XLSX, and text-based PDFs. Scanned PDFs
+need OCR first; legacy XLS spreadsheets and video files remain archived but are
+not analyzed. Processing limits are 5 MB per image/audio file, 9 MB combined
+image/audio data, and 20 MB per document. PDF and legacy DOC text extraction use
+the `pdftotext` and `antiword` system utilities available in this workspace.
 
 See [replit.md](replit.md) for the complete configuration, storage behavior,
 security requirements, tests, and deployment limitations.
@@ -26,7 +48,7 @@ security requirements, tests, and deployment limitations.
 | GitHub Repository | https://github.com/your-username/your-project  |
 | Replit Project    | https://replit.com/@your-username/your-project |
 | Live Demo         | https://your-project.replit.app                |
-| RunPod Endpoint   | https://api.runpod.ai/v2/your-endpoint-id      |
+| RunPod Endpoint   | Configured in `RUNPOD_ENDPOINT_URL`            |
 | Slide Deck        | https://example.com/slides                     |
 | Demo Video        | https://example.com/demo-video                 |
 

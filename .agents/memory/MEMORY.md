@@ -2,3 +2,4 @@
 - [Preview TLS trust](preview-tls-trust.md) — Python preview checks need the system CA bundle; never disable certificate verification.
 - [Workflow process cleanup](workflow-process-cleanup.md) — use `exec` for Python webserver workflow commands so restarts do not leave stale listeners.
 - [Preview database stalls](preview-database-stalls.md) — health/session endpoints can pass while SQLite is stuck; verify actual staff login and inbox access.
+- [Python package installation](python-package-installation.md) — this workspace disables pip user installs; verify managed dependency support before adding parsers.
