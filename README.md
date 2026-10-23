@@ -1,6 +1,7 @@
 # Project Name
 
-> A one-sentence description of what your project does and who it is for.
+AI-Powered WhatsApp e-Invoicing Compliance Extraction Agent
+
 
 ---
 
@@ -8,12 +9,12 @@
 
 | Field                  | Details                                     |
 | ---------------------- | ------------------------------------------- |
-| **Team Name**          | Your Team Name                              |
-| **Team Domain**        | Domain 1 / Domain 2 *(choose one)*          |
-| **SDG Track (1–17)**   | e.g. SDG 11 — Sustainable Cities and Communities |
-| **Team Leader**        | Leader Name                                 |
-| **University**         | University Name(s)                          |
-| **Number of Members**  | e.g. 4                                      |
+| **Team Name**          | Ctrl + Sleep                                |
+| **Team Domain**        |  Domain 2                                   |
+| **SDG Track (1–17)**   | SDG 9                                       |
+| **Team Leader**        | Chin Xian Jing                              |
+| **University**         | University of Nottingham Malaysia           |
+| **Number of Members**  | 4                                           |
 
 ## Links
 
@@ -31,17 +32,17 @@
 ## Overview
 
 ### Problem
+The manual processing of invoices and the extraction of financial data is tedious, prone to errors, and time-consuming, causing bottlenecks for the accounting staff, SMEs, and the finance department. The redundant process decreases efficiency and slows down the process of generating the financial report. With the help of an automated DeepSeek AI parser that is cost-efficient, it is possible to prevent human error and minimize the processing time.
 
-Describe the real-world problem you are solving in 2–4 sentences. Who is affected, and why does it matter?
 
 ### Solution
 
-Explain how your project uses AI to solve the problem and what makes it valuable.
+The project focuses on solving manual document processing issues by employing a quantized DeepSeek-V4.1-Flash model, which is running on the serverless infrastructure of RunPod and can automatically process, extract, and structure data from complicated invoices with a high level of precision. The system employs the model through a standard vLLM API, compatible with the OpenAI API, and thus immediately replaces manual work with instant document processing in a seamless manner. The key advantage of this technology is in its outstanding combination of performance, cost-effectiveness, and integratability. The use of 2.9bpw EXL3 quantization allows one to run the latest LLM on affordable GPUs, and the serverless Load Balancer architecture automatically shrinks to zero when the model is not in use, meaning businesses pay only for processing time.
 
 ### Key Features
 
-- **Feature 1** — Short description.
-- **Feature 2** — Short description.
+- **Feature 1** — Whatsapp AI helper will read all the document in all of the chat of busniess account.
+- **Feature 2** — 
 - **Feature 3** — Short description.
 
 ### Tech Stack
