@@ -87,7 +87,7 @@
       const headerActions = el("div", "qe-header-actions");
       headerActions.appendChild(el("span", "qe-overline", "Internal decision support"));
       if (typeof options.onBack === "function") {
-        const back = button("Back to inbox", "qe-back-button", options.onBack);
+        const back = button("Back to home", "qe-back-button", options.onBack);
         headerActions.appendChild(back);
       }
       header.append(brand, headerActions);

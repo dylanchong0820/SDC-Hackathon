@@ -14,7 +14,9 @@
     refresh: '<path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.7 9A7 7 0 0 1 18 6l2 2M4 16l2 2a7 7 0 0 0 12.3-3"/>',
     close: '<path d="m6 6 12 12M18 6 6 18"/>',
     download: '<path d="M12 3v12m-5-5 5 5 5-5"/><path d="M5 17v3h14v-3"/>',
-    list: '<path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h.01M4 12h.01M4 18h.01"/>'
+    list: '<path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h.01M4 12h.01M4 18h.01"/>',
+    home: '<path d="m3 10 9-7 9 7"/><path d="M5 9.5V21h14V9.5M9 21v-6h6v6"/>',
+    assistant: '<path d="M12 3.5v3M12 17.5v3M3.5 12h3m11 0h3M6 6l2.2 2.2m7.6 7.6L18 18M18 6l-2.2 2.2m-7.6 7.6L6 18"/><circle cx="12" cy="12" r="4"/>'
   };
   const state = {
     csrf: "", authenticated: false, staffConfigured: true, status: null, settings: null,
@@ -274,10 +276,15 @@
       right.appendChild(refs.lastEvent);
     }
     right.append(connection);
+    right.appendChild(button("Workspace home", "icon-button", "home", () => setMode("home")));
     const quotes = button("Compare quotations", "icon-button quote-button", "list",
       () => setMode("quotes"));
     quotes.title = "Compare client quotations";
     right.appendChild(quotes);
+    right.appendChild(button("Quotation register", "icon-button", "download",
+      () => setMode("register")));
+    right.appendChild(button("Quote AI chat", "icon-button", "assistant",
+      () => setMode("chat")));
     right.appendChild(button("Configuration checklist", "icon-button", "list", () => setMode("checklist")));
     right.appendChild(button("Settings", "icon-button", "settings", () => setMode("settings")));
     const logout = node("button", "quiet-button", "Sign out");
@@ -966,6 +973,10 @@
       state.listError = "";
       clearListError();
       refs.syncLabel.textContent = "Up to date";
+      if (state.mode === "home" && window.WorkspaceHome &&
+          typeof window.WorkspaceHome.update === "function") {
+        window.WorkspaceHome.update({ conversationCount: state.conversations.length });
+      }
       renderConversationList();
       syncSelectedConversationChrome();
       updateConnection();
@@ -1056,20 +1067,61 @@
         typeof window.QuoteEvaluator.unmount === "function") {
       window.QuoteEvaluator.unmount();
     }
+    if (mode !== "home" && window.WorkspaceHome &&
+        typeof window.WorkspaceHome.unmount === "function") {
+      window.WorkspaceHome.unmount();
+    }
+    if (mode !== "register" && window.QuotationRegister &&
+        typeof window.QuotationRegister.unmount === "function") {
+      window.QuotationRegister.unmount();
+    }
+    if (mode !== "chat" && window.QuoteChat &&
+        typeof window.QuoteChat.unmount === "function") {
+      window.QuoteChat.unmount();
+    }
     state.mode = mode;
     if (!refs.main) return;
+    refs.workspace.classList.toggle("home-mode", mode === "home");
     if (mode !== "inbox") refs.workspace.classList.add("chat-open");
     if (mode === "inbox") renderInbox();
+    else if (mode === "home") {
+      if (window.WorkspaceHome && typeof window.WorkspaceHome.mount === "function") {
+        window.WorkspaceHome.mount({
+          container: refs.main,
+          onNavigate: setMode,
+          conversationCount: state.conversations.length,
+          healthStatus: state.status
+        });
+      } else {
+        refs.main.replaceChildren(node("div", "inline-error", "The workspace home screen could not load. Refresh the page and try again."));
+      }
+    }
     else if (mode === "settings") renderSettings();
     else if (mode === "new") renderNewConversation();
     else if (mode === "checklist") renderChecklist();
     else if (mode === "quotes") {
       if (window.QuoteEvaluator && typeof window.QuoteEvaluator.mount === "function") {
         window.QuoteEvaluator.mount({
-          container: refs.main, request, toast, onBack: () => setMode("inbox")
+          container: refs.main, request, toast, onBack: () => setMode("home")
         });
       } else {
         refs.main.replaceChildren(node("div", "inline-error", "The quotation comparison screen could not load. Refresh the page and try again."));
+      }
+    } else if (mode === "register") {
+      if (window.QuotationRegister && typeof window.QuotationRegister.mount === "function") {
+        window.QuotationRegister.mount({
+          container: refs.main, request, toast, onBack: () => setMode("home")
+        });
+      } else {
+        refs.main.replaceChildren(node("div", "inline-error", "The quotation register screen could not load. Refresh the page and try again."));
+      }
+    } else if (mode === "chat") {
+      if (window.QuoteChat && typeof window.QuoteChat.mount === "function") {
+        window.QuoteChat.mount({
+          container: refs.main, request, toast, onBack: () => setMode("home")
+        });
+      } else {
+        refs.main.replaceChildren(node("div", "inline-error", "The Quote AI chat screen could not load. Refresh the page and try again."));
       }
     }
   }
@@ -1594,11 +1646,11 @@
       state.pollError = "";
       state.listError = "";
       if (state.selectedId && !state.conversations.some((item) => String(item.id) === String(state.selectedId))) state.selectedId = null;
+      state.mode = "home";
       makeWorkspace();
-      if (state.selectedId !== null) renderInbox();
-      else renderInbox();
+      setMode("home");
       startPolling();
-      if (state.selectedId !== null) fetchMessages(true);
+      if (state.selectedId !== null && state.mode === "inbox") fetchMessages(true);
     } catch (err) {
       if (!state.authenticated) return;
       showStartupError(`The staff session is active, but the inbox could not load. ${err.message}`);

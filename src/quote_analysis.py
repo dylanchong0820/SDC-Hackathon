@@ -614,6 +614,45 @@ class QuoteAnalysisWorker:
             raise QuoteAnalysisError("The model returned an invalid quotation comparison. Try again.")
         return parsed
 
+    def complete_chat(self, messages):
+        """Return a plain-text assistant reply for a validated staff conversation."""
+        model_id = self._get_model_id()
+        payload = {
+            "model": model_id,
+            "temperature": 0.2,
+            "max_tokens": 1200,
+            "messages": messages,
+        }
+        try:
+            response = requests.post(
+                self.endpoint_url + "/v1/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}",
+                         "Content-Type": "application/json", "Accept": "application/json"},
+                json=payload,
+                timeout=(10, min(self.request_timeout, 90)),
+            )
+        except requests.Timeout:
+            raise QuoteAnalysisError("RunPod took too long to answer. Try again in a moment.") from None
+        except requests.RequestException:
+            raise QuoteAnalysisError("Could not connect to the RunPod model endpoint.") from None
+        if response.status_code in (401, 403):
+            raise QuoteAnalysisError("RunPod rejected the API key. Update RUNPOD_API_KEY in Replit Secrets.")
+        if response.status_code == 429:
+            raise QuoteAnalysisError("RunPod is busy. Wait a moment, then send your message again.")
+        if not response.ok:
+            raise QuoteAnalysisError(f"RunPod chat failed (HTTP {response.status_code}).")
+        try:
+            content = response.json()["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError):
+            raise QuoteAnalysisError("RunPod returned an unexpected chat response.") from None
+        if isinstance(content, list):
+            content = "".join(
+                str(part.get("text", "")) for part in content if isinstance(part, dict)
+            )
+        if not isinstance(content, str) or not content.strip():
+            raise QuoteAnalysisError("RunPod returned an empty answer. Try rephrasing your message.")
+        return content.strip()[:12_000]
+
     def _analyze(self, evaluation_id):
         current = self.store.quote_evaluation_inputs(evaluation_id)
         if not current:

@@ -364,6 +364,77 @@ class Store:
             result.append(item)
         return result
 
+    def quotation_register(self):
+        """Return one row per source in every completed comparison."""
+        with self.db() as db:
+            rows = db.execute("""
+                SELECT e.id AS comparison_id,e.created_at AS comparison_created_at,
+                       e.updated_at AS analyzed_at,e.priority,e.selected_message_id,
+                       e.result_json,s.message_id,s.position,m.timestamp AS received_at,
+                       m.type AS message_type,m.filename,m.mime_type,m.body,m.caption,
+                       c.name AS client_name,c.wa_id
+                FROM quote_evaluations e
+                JOIN quote_evaluation_sources s ON s.evaluation_id=e.id
+                JOIN messages m ON m.id=s.message_id
+                JOIN conversations c ON c.id=s.conversation_id
+                WHERE e.status='completed'
+                ORDER BY e.created_at DESC,e.id DESC,s.position
+            """).fetchall()
+
+        register = []
+        decoded = {}
+        for row in rows:
+            comparison_id = row["comparison_id"]
+            if comparison_id not in decoded:
+                try:
+                    decoded[comparison_id] = json.loads(row["result_json"] or "{}")
+                except (TypeError, ValueError):
+                    decoded[comparison_id] = {}
+            result = decoded[comparison_id]
+            quotes = result.get("quotes", []) if isinstance(result, dict) else []
+            if not isinstance(quotes, list):
+                quotes = []
+            quote = next((
+                item for item in quotes
+                if isinstance(item, dict)
+                and str(item.get("message_id", "")) == str(row["message_id"])
+            ), None)
+            if not quote:
+                continue
+            notes = quote.get("notes") or []
+            if isinstance(notes, list):
+                notes = " · ".join(str(item) for item in notes if item)
+            else:
+                notes = str(notes)
+            register.append({
+                "comparison_id": comparison_id,
+                "message_id": row["message_id"],
+                "received_at": row["received_at"],
+                "analyzed_at": row["analyzed_at"],
+                "priority": row["priority"],
+                "client_name": row["client_name"] or row["wa_id"],
+                "wa_id": row["wa_id"],
+                "message_type": row["message_type"],
+                "filename": row["filename"] or quote.get("filename") or "",
+                "vendor": quote.get("vendor") or "",
+                "total_price": quote.get("total_price"),
+                "currency": quote.get("currency") or "",
+                "price_basis": quote.get("price_basis") or "",
+                "delivery_days": quote.get("delivery_days"),
+                "delivery_unit": quote.get("delivery_unit") or "",
+                "delivery_date": quote.get("delivery_date") or "",
+                "delivery_text": quote.get("delivery_text") or "",
+                "rank": quote.get("rank"),
+                "recommended": bool(quote.get("recommended")),
+                "team_choice": str(row["selected_message_id"] or "") == str(row["message_id"]),
+                "confidence": quote.get("confidence"),
+                "evidence": quote.get("evidence") or "",
+                "notes": notes,
+                "extraction_error": quote.get("extraction_error") or "",
+                "message_excerpt": (row["body"] or row["caption"] or "")[:1000],
+            })
+        return register
+
     def select_quote(self, evaluation_id, message_id):
         with self.db() as db:
             evaluation = db.execute(

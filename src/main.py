@@ -1,19 +1,18 @@
-"""Application entry point.
-
-Replace this file with your project's main logic.
-"""
-
+"""Primary application entry point for Quote Bot AI."""
 import os
 
-from utils import format_greeting, summarize
+if __package__:
+    from .server import PrivateRequestHandler, create_app
+else:
+    from server import PrivateRequestHandler, create_app
 
 
-def main() -> None:
-    project_name = os.getenv("PROJECT_NAME", "Project Name")
-    print(format_greeting(project_name))
-
-    sample_data = [12, 7, 3, 21, 9]
-    print(f"Result: {summarize(sample_data)}")
+def main():
+    create_app().run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "5000")),
+        request_handler=PrivateRequestHandler,
+    )
 
 
 if __name__ == "__main__":

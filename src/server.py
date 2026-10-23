@@ -1,8 +1,10 @@
-"""WhatsApp receiver and staff website. Run with: python src/server.py."""
+"""WhatsApp receiver and staff website. Run with: python src/main.py."""
 from datetime import timedelta
 from functools import wraps
+import base64
 import hashlib
 import hmac
+from io import BytesIO
 import os
 from pathlib import Path
 import re
@@ -18,12 +20,24 @@ from werkzeug.utils import secure_filename
 
 if __package__:
     from .history_import import HistoryImportError, parse_whatsapp_export
-    from .quote_analysis import QuoteAnalysisWorker
+    from .quotation_export import MIME_TYPE as QUOTATION_XLSX_MIME, build_quotation_workbook
+    from .quote_analysis import QuoteAnalysisError, QuoteAnalysisWorker
+    from .quote_chat import (
+        QuoteChatContextTooLarge, QuoteChatInputError, QuoteChatOutputError,
+        parse_model_output, prepare_model_messages,
+    )
+    from .quote_chat_pdf import build_quote_chat_pdf
     from .storage import Store, StorageBusyError
     from .whatsapp import GraphClient, GraphError, MediaWorker, process_event
 else:
     from history_import import HistoryImportError, parse_whatsapp_export
-    from quote_analysis import QuoteAnalysisWorker
+    from quotation_export import MIME_TYPE as QUOTATION_XLSX_MIME, build_quotation_workbook
+    from quote_analysis import QuoteAnalysisError, QuoteAnalysisWorker
+    from quote_chat import (
+        QuoteChatContextTooLarge, QuoteChatInputError, QuoteChatOutputError,
+        parse_model_output, prepare_model_messages,
+    )
+    from quote_chat_pdf import build_quote_chat_pdf
     from storage import Store, StorageBusyError
     from whatsapp import GraphClient, GraphError, MediaWorker, process_event
 
@@ -350,6 +364,35 @@ def create_app(config=None):
                          as_attachment=request.args.get("download") == "1" or not safe_inline,
                          download_name=row["filename"] or path.name, conditional=True)
 
+    @app.post("/api/quote-chat")
+    @require_staff
+    def quote_chat():
+        data = json_body()
+        try:
+            messages, comparison_count, quote_count = prepare_model_messages(
+                data.get("messages"), store.quotation_register())
+        except QuoteChatInputError as error:
+            return jsonify(error=str(error)), 400
+        except QuoteChatContextTooLarge as error:
+            return jsonify(error=str(error)), 413
+        try:
+            model_output = app.extensions["quote_worker"].complete_chat(messages)
+        except QuoteAnalysisError as error:
+            return jsonify(error=str(error)), 502
+        try:
+            reply, items = parse_model_output(model_output)
+        except QuoteChatOutputError as error:
+            return jsonify(error=str(error)), 502
+        pdf = build_quote_chat_pdf(reply, items, comparison_count, quote_count)
+        return jsonify(
+            reply=reply,
+            items=items,
+            pdf_base64=base64.b64encode(pdf).decode("ascii"),
+            pdf_filename=f"quote-ai-output-{int(time.time() * 1000)}.pdf",
+            comparison_count=comparison_count,
+            quote_count=quote_count,
+        )
+
     @app.post("/api/messages/<path:message_id>/retry-media")
     @require_staff
     def retry_media(message_id):
@@ -414,6 +457,24 @@ def create_app(config=None):
         if not evaluation:
             return jsonify(error="Quote comparison not found. It may have been removed with chat history."), 404
         return jsonify(evaluation=evaluation)
+
+    @app.get("/api/quotation-register")
+    @require_staff
+    def quotation_register():
+        rows = store.quotation_register()
+        response = jsonify(rows=rows, total=len(rows))
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+    @app.get("/api/quotation-register.xlsx")
+    @require_staff
+    def export_quotation_register():
+        workbook = build_quotation_workbook(store.quotation_register())
+        response = send_file(
+            BytesIO(workbook), mimetype=QUOTATION_XLSX_MIME, as_attachment=True,
+            download_name="quotation-register.xlsx", max_age=0)
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
 
     @app.get("/api/settings")
     @require_staff

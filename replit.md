@@ -1,11 +1,11 @@
-# WhatsApp Desk
+# Quote Bot AI
 
 The existing Python/Flask app now serves both the WhatsApp Cloud API webhook and
 the staff website. Keep the Python stack and the original local archive.
 
 ## Running
 
-- Workflow: `Start application` → `python src/server.py`.
+- Workflow: `Start application` → `python src/main.py` (uses `exec` so restarts do not leave stale listeners).
 - Listen on `0.0.0.0:5000`; website `/`, webhook `/webhook`, health `/health`.
 - Runtime dependencies: `requirements.txt`. Optional browser-test tooling:
   `requirements-dev.txt`.
@@ -68,6 +68,7 @@ never advance the live inbound timestamp or activate a reply window.
   their file extensions and names. Unique filenames avoid same-second overwrites.
 - Other types retain raw message content (contacts, location, reactions,
   interactive replies, orders, system/future types). Raw payloads are staff-only.
+- Quote AI Chat sends saved completed comparison facts to the configured RunPod model on each request. It omits phone numbers, message IDs, raw attachment files, and unsaved inbox content. Each answer generates a four-column PDF in the response; PDFs and temporary chat transcripts are not stored in inbox history.
 - Text sends: at most 4096 characters, only within the 24-hour customer-service
   window since an inbound customer message. Starting an empty conversation does
   not send anything or open that window. Approved-template sends are not part of

@@ -66,17 +66,18 @@ Explain how your project uses AI to solve the problem and what makes it valuable
 
 ### Key Features
 
-- **Feature 1** — Short description.
-- **Feature 2** — Short description.
-- **Feature 3** — Short description.
+- **Shared WhatsApp inbox** — Receive messages and attachments; staff can reply using the business number.
+- **Price comparison** — Compare selected quotations using price, delivery time, or both.
+- **Quotation register** — Review saved analysis details and export the records as an Excel workbook.
+- **Quote AI Chat** — Ask questions using all saved completed comparisons and download each answer as a PDF with company, item, price, and requirement columns. Chat responses are not sent to customers.
 
 ### Tech Stack
 
 | Layer         | Technology                   |
 | ------------- | ---------------------------- |
-| Frontend      | e.g. HTML, React             |
-| Backend       | e.g. Python, Flask / FastAPI |
-| Database      | e.g. PostgreSQL, SQLite      |
+| Frontend      | HTML, CSS, vanilla JavaScript |
+| Backend       | Python, Flask                 |
+| Database      | SQLite                        |
 | AI / Compute  | RunPod (GPU)                 |
 | Hosting / Dev | Replit                       |
 
@@ -87,11 +88,14 @@ Explain how your project uses AI to solve the problem and what makes it valuable
 ```
 .
 ├── docs/                    # Screenshots, diagrams
-├── runpod/
-│   └── handler.py           # RunPod serverless handler (GPU workload)
 ├── src/
 │   ├── main.py              # Application entry point
-│   └── utils.py             # Helper functions
+│   ├── server.py            # Flask API, website, and webhook
+│   ├── storage.py           # WhatsApp archive and quotation records
+│   ├── quote_analysis.py    # Local extraction and RunPod comparison
+│   └── quotation_export.py  # Excel workbook generation
+├── runpod/
+│   └── handler.py           # Optional template; not used by the configured vLLM endpoint
 ├── submission/              # Required submission documents
 │   ├── REPLIT PROOF OF USE.pdf
 │   ├── RUNPOD PROOF OF USE.pdf
@@ -122,8 +126,8 @@ User ──► Replit (App / API) ──► RunPod Endpoint (GPU model)
 
 1. Open the [Replit Project](https://replit.com/@your-username/your-project), or import this repository via **Create Repl → Import from GitHub**.
 2. Add `SESSION_SECRET`, `STAFF_PASSWORD` (12+ characters), `META_ACCESS_TOKEN`,
-   `WEBHOOK_VERIFY_TOKEN`, and `META_APP_SECRET` in Replit Secrets.
-3. Click **Run** to start `python src/server.py`, then sign in to the website.
+   `WEBHOOK_VERIFY_TOKEN`, `META_APP_SECRET`, and `RUNPOD_API_KEY` in Replit Secrets.
+3. Click **Run** to start `python src/main.py`, then sign in to the website.
 4. In Settings, enter the business **phone number ID** from Meta's WhatsApp API
    Setup page. Configure the site's HTTPS URL plus `/webhook` in Meta and
    subscribe to `messages` events.
@@ -147,7 +151,7 @@ pip install -r requirements.txt
 # 4. Configure the variables above in your local environment (or a private .env).
 
 # 5. Run the app
-python src/server.py
+python src/main.py
 ```
 
 ### Run Tests
@@ -170,20 +174,11 @@ Describe how your team used Replit. For example:
 
 ## How We Use RunPod *(Required)*
 
-Describe how your team used RunPod. For example:
-
-- **Workload:** Model inference (e.g. text generation, image processing) runs on a RunPod GPU.
-- **Setup:** `runpod/handler.py` is deployed as a **RunPod Serverless Endpoint**.
-- **Integration:** The Replit app sends requests to the endpoint using `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID`.
-
-Example request:
-
-```bash
-curl -X POST https://api.runpod.ai/v2/$RUNPOD_ENDPOINT_ID/runsync \
-  -H "Authorization: Bearer $RUNPOD_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"input": {"prompt": "Hello"}}'
-```
+The Replit app calls the configured RunPod endpoint's OpenAI-compatible
+`/v1/models` and `/v1/chat/completions` routes using `RUNPOD_API_KEY`. Set
+`RUNPOD_ENDPOINT_URL` only if the project should use a different endpoint.
+`runpod/handler.py` is an unused template for a separately configured custom
+handler; it is not part of the current vLLM-based quotation flow.
 
 📄 Proof of use: [`submission/RUNPOD PROOF OF USE.pdf`](submission/RUNPOD%20PROOF%20OF%20USE.pdf)
 
