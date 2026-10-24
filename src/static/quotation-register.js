@@ -47,12 +47,18 @@
       if (!Number.isFinite(value)) return `${currency ? `${currency} ` : ""}${String(amount)}`;
       try {
         return new Intl.NumberFormat(undefined, {
-          style: currency ? "currency" : "decimal", currency: currency || undefined, maximumFractionDigits: 2
+          style: currency ? "currency" : "decimal", currency: currency || undefined, currencyDisplay: "code", minimumFractionDigits: 2, maximumFractionDigits: 2
         }).format(value);
       } catch (_) {
         return `${currency ? `${currency} ` : ""}${value.toLocaleString()}`;
       }
     };
+    const myrPrice = (row) => row.myr_total_price == null ? "MYR unavailable" : money("MYR", row.myr_total_price);
+    const currencyDetails = (row) => [
+      row.currency !== "MYR" && row.total_price != null ? `Original: ${money(row.currency, row.total_price)}` : "",
+      row.exchange_rate_date ? `1 ${row.currency} = MYR ${Number(row.exchange_rate).toLocaleString(undefined, { maximumFractionDigits: 6 })} · ${row.exchange_rate_date} · ${row.exchange_rate_source}` : "",
+      row.conversion_error || ""
+    ].filter(Boolean).join(" · ");
     const delivery = (row) => {
       if (row.delivery_text) return String(row.delivery_text);
       if (row.delivery_date) return formatDate(row.delivery_date);
@@ -164,7 +170,7 @@
       table.setAttribute("aria-label", "Completed quotation comparison records");
       const thead = el("thead");
       const header = el("tr");
-      ["Client / vendor", "Source", "Price", "Delivery", "Priority / rank", "Recommendation / team choice", "Evidence"].forEach((label) => {
+      ["Client / vendor", "Source", "Price (MYR)", "Delivery", "Priority / rank", "Recommendation / team choice", "Evidence"].forEach((label) => {
         header.appendChild(el("th", "", label));
       });
       thead.appendChild(header);
@@ -198,7 +204,8 @@
         el("small", "", `Analyzed ${formatDate(row.analyzed_at)}`));
 
       const price = el("td", "qr-table-price");
-      price.append(el("strong", "", money(row.currency, row.total_price)));
+      price.append(el("strong", "", myrPrice(row)));
+      if (currencyDetails(row)) price.appendChild(el("small", "", currencyDetails(row)));
       if (row.price_basis) price.appendChild(el("small", "", `Basis: ${row.price_basis}`));
 
       const deliveryCell = el("td", "qr-table-delivery");
@@ -234,7 +241,7 @@
       top.append(identity, pills);
       const metrics = el("div", "qr-metrics");
       metrics.append(
-        metric("Price", money(row.currency, row.total_price), row.price_basis ? `Basis: ${row.price_basis}` : ""),
+        metric("Price (MYR)", myrPrice(row), [currencyDetails(row), row.price_basis ? `Basis: ${row.price_basis}` : ""].filter(Boolean).join(" · ")),
         metric("Delivery", delivery(row), row.delivery_text && row.delivery_days != null ? `${row.delivery_days}${row.delivery_unit ? ` ${row.delivery_unit}` : " days"}` : ""),
         metric("Rank", row.rank == null ? "Not ranked" : `#${row.rank}`, row.recommended ? "Suggested option" : row.team_choice ? "Recorded team selection" : "")
       );

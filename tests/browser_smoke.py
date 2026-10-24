@@ -18,6 +18,7 @@ from playwright.sync_api import sync_playwright, expect
 from werkzeug.serving import make_server
 
 from src.server import create_app
+from src.quote_analysis import rank_quotes
 from src.whatsapp import process_event
 
 CHROMIUM_PATH = os.getenv("CHROMIUM_PATH") or shutil.which("chromium")
@@ -32,13 +33,78 @@ class FakeGraph:
         return f"wamid.browser-out-{len(self.sent)}"
 
 
+class FakeQuoteWorker:
+    def __init__(self):
+        self.jobs = []
+
+    def submit(self, evaluation_id):
+        self.jobs.append(evaluation_id)
+
+
+def check_chat_layout(page, outputs):
+    """Exercise real chat rendering with synthetic replies, without calling RunPod."""
+    question = "Please compare these quotations:\n" + "supplier_reference_" * 70
+    reply = ("Price and delivery notes: MYR 450.00; 原价 USD 100.00.\n" * 45
+             + "https://example.invalid/quotation/" + "long-reference-" * 90)
+    def fake_chat(route):
+        route.fulfill(json={
+            "reply": reply, "items": [],
+            "pdf_base64": base64.b64encode(b"%PDF-1.4 isolated-layout-fixture").decode(),
+            "pdf_filename": "layout-fixture.pdf", "comparison_count": 1, "quote_count": 2,
+        })
+    page.route("**/api/quote-chat", fake_chat)
+    try:
+        for width, height in ((280, 320), (320, 360), (390, 844), (701, 400),
+                              (850, 500), (1024, 450), (1440, 900)):
+            page.set_viewport_size({"width": width, "height": height})
+            page.get_by_role("button", name="Workspace home", exact=True).click()
+            page.get_by_role("button", name="Quote AI chat", exact=True).click()
+            expect(page.locator(".qc-empty")).to_be_visible()
+            assert page.locator(".qc-empty").evaluate("""el => {
+                const last = el.lastElementChild.getBoundingClientRect();
+                return last.bottom <= el.getBoundingClientRect().bottom + 1;
+            }"""), f"Empty conversation content escapes its box at {width}x{height}"
+            page.locator(".qc-input").fill(question)
+            page.locator(".qc-send").click()
+            expect(page.locator(".qc-turn.is-assistant")).to_be_visible()
+            assert page.locator(".qc-transcript").evaluate("""el =>
+                el.scrollHeight > el.clientHeight && el.scrollWidth <= el.clientWidth + 1
+            """), f"Chat must scroll vertically without horizontal overflow at {width}x{height}"
+            assert page.locator(".qc-root").evaluate("""root =>
+                [...root.querySelectorAll('.qc-turn, .qc-turn-body, .qc-prompt, .qc-composer, .qc-panel-head')]
+                    .every(el => el.scrollWidth <= el.clientWidth + 1 &&
+                        el.scrollHeight <= el.clientHeight + 1)
+            """), f"Conversation text or controls escape their boxes at {width}x{height}"
+            assert page.locator(".qc-turn").evaluate_all("""turns =>
+                turns.every((turn, i) => !i ||
+                    turn.getBoundingClientRect().top >= turns[i-1].getBoundingClientRect().bottom)
+            """), f"Long conversation bubbles overlap at {width}x{height}"
+            transcript = page.locator(".qc-transcript")
+            transcript.evaluate("el => el.scrollTop = 0")
+            expect(page.locator(".qc-turn.is-user")).to_be_in_viewport()
+            transcript.evaluate("el => el.scrollTop = el.scrollHeight")
+            download = page.get_by_role("button", name="Download this Quote AI response as a PDF", exact=True)
+            download.scroll_into_view_if_needed()
+            expect(download).to_be_in_viewport()
+            page.locator(".qc-input").scroll_into_view_if_needed()
+            expect(page.locator(".qc-input")).to_be_in_viewport()
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+            if width in (320, 1024):
+                page.locator(".qc-transcript-panel").screenshot(
+                    path=str(outputs / f"chat-conversation-{width}.png"), animations="disabled")
+    finally:
+        page.unroute("**/api/quote-chat", fake_chat)
+
+
 def run():
     root = Path(__file__).resolve().parent.parent
     outputs = root / "generated-artifacts" / "browser-check"
     outputs.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as archive:
         graph = FakeGraph()
+        quote_worker = FakeQuoteWorker()
         app = create_app({
+            "QUOTE_WORKER": quote_worker,
             "TESTING": True, "MEDIA_WORKER": False, "DATA_DIR": archive,
             "SECRET_KEY": "isolated-browser-test-session-only",
             "STAFF_PASSWORD": "isolated-browser-test-password",
@@ -145,8 +211,13 @@ def run():
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), "Mobile page overflows"
                 # Every staff tool must remain reachable in narrow, short windows.
                 for viewport in ({"width": 390, "height": 420}, {"width": 320, "height": 360},
-                                 {"width": 1024, "height": 450}):
+                                 {"width": 641, "height": 450}, {"width": 1024, "height": 450}):
                     page.set_viewport_size(viewport)
+                    navigation_bar = page.get_by_role("navigation", name="Workspace tools")
+                    for label in ("Home", "Compare quotes", "Quote register", "AI chat",
+                                  "Setup checklist", "Settings", "Sign out"):
+                        expect(navigation_bar.get_by_text(label, exact=True)).to_be_visible()
+                    page.locator(".topbar").screenshot(path=str(outputs / f"header-{viewport['width']}.png"))
                     for navigation, selector in (
                         ("Workspace home", ".wh-root"),
                         ("Compare quotations", ".qe-root"),
@@ -157,11 +228,30 @@ def run():
                     ):
                         page.get_by_role("button", name=navigation, exact=True).click()
                         page.locator(selector).wait_for()
+                        expect(page.get_by_role("button", name=navigation, exact=True)).to_have_attribute("aria-current", "page")
                         if navigation == "Compare quotations" and viewport["width"] == 390:
                             page.get_by_role("button", name="Stop comparison", exact=True).click()
                             expect(page.get_by_text(
                                 "Comparison stopped. You can change the selected sources or priority and start another comparison."
                             )).to_be_visible()
+                            page.locator(".qe-source").filter(
+                                has_text="Can you review the attached documents?").locator("input").check()
+                            page.locator(".qe-source").filter(
+                                has_text="test-document.pdf").locator("input").check()
+                            page.get_by_role("button", name="Review selected", exact=True).click()
+                            page.locator(".qe-review").wait_for()
+                            expect(page.locator(".qe-review-text")).to_contain_text("Can you review the attached documents?")
+                            expect(page.locator(".qe-review .qe-inline-error")).to_be_visible()
+                            expect(page.get_by_role("button", name="Send confirmed to AI (0)", exact=True)).to_be_disabled()
+                            assert not quote_worker.jobs, "Preview unexpectedly queued AI analysis"
+                            page.screenshot(path=str(outputs / "quote-review-mobile.png"), full_page=True)
+                            page.locator(".qe-review-source").filter(
+                                has_text="Can you review the attached documents?").locator("input").check()
+                            page.get_by_role("button", name="Send confirmed to AI (1)", exact=True).click()
+                            page.locator(".qe-review").wait_for(state="detached")
+                            assert len(quote_worker.jobs) == 1
+                            reviewed_inputs = store.quote_evaluation_inputs(quote_worker.jobs[0])
+                            assert [row["id"] for row in reviewed_inputs["messages"]] == ["wamid.browser-text"]
                         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), (
                             f"{navigation} overflows at {viewport}"
                         )
@@ -170,6 +260,13 @@ def run():
                             "scrollY + innerHeight >= document.scrollingElement.scrollHeight - 2"
                         ), f"{navigation} cannot scroll to the bottom at {viewport}"
                         page.evaluate("window.scrollTo(0, 0)")
+                        home_brand = page.get_by_role("button", name="Quote Bot AI: workspace home", exact=True)
+                        if navigation == "Settings":
+                            home_brand.focus()
+                            home_brand.press("Enter")
+                        else:
+                            home_brand.click()
+                        expect(page.locator(".wh-root")).to_be_visible()
                     page.get_by_role("button", name="Workspace home", exact=True).click()
                     page.get_by_role("button", name="Inbox. Customer conversations", exact=True).click()
                     if viewport["width"] <= 640 and page.get_by_label("Message", exact=True).is_visible():
@@ -187,7 +284,32 @@ def run():
                     assert page.locator(".message-scroll").evaluate(
                         "el => getComputedStyle(el).overflowY === 'auto' && el.clientHeight > 0"
                     ), f"Inbox messages have no scroll area at {viewport}"
+                # Fixed exchange rates exercise comparison/register views without a live provider.
+                currency_evaluation = store.create_quote_evaluation(
+                    ["wamid.browser-text", "wamid.browser-image"], "price")
+                currency_result = rank_quotes([
+                    {"message_id": "wamid.browser-text", "client_name": "USD Supplier",
+                     "currency": "USD", "total_price": 100},
+                    {"message_id": "wamid.browser-image", "client_name": "MYR Supplier",
+                     "currency": "MYR", "total_price": 500},
+                ], "price", {"USD": {"rate": "4.5", "date": "2026-10-23", "source": "Fixture rates"}})
+                store.update_quote_evaluation(currency_evaluation["id"], "completed", result=currency_result)
+                for currency_viewport in ({"width": 1280, "height": 900}, {"width": 390, "height": 844}):
+                    page.set_viewport_size(currency_viewport)
+                    page.get_by_role("button", name="Compare quotations", exact=True).click()
+                    expect(page.locator(".qe-results")).to_contain_text("Original: USD")
+                    expect(page.locator(".qe-results")).to_contain_text("450.00")
+                    expect(page.locator(".qe-results")).to_contain_text("2026-10-23")
+                    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), "Currency comparison overflows"
+                    page.screenshot(path=str(outputs / f"currency-comparison-{currency_viewport['width']}.png"), full_page=True)
+                    page.get_by_role("button", name="Quotation register", exact=True).click()
+                    expect(page.locator(".qr-root")).to_contain_text("Original: USD")
+                    expect(page.locator(".qr-root")).to_contain_text("450.00")
+                    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+                    page.screenshot(path=str(outputs / f"currency-register-{currency_viewport['width']}.png"), full_page=True)
                 page.set_viewport_size({"width": 390, "height": 844})
+                page.get_by_role("button", name="Settings", exact=True).click()
+                check_chat_layout(page, outputs)
                 page.get_by_role("button", name="Settings", exact=True).click()
                 # A second employee must drop cached messages when another clears history.
                 colleague_context = browser.new_context(viewport={"width": 1280, "height": 800})

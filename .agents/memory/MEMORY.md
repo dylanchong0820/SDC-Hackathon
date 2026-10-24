@@ -4,3 +4,6 @@
 - [Preview database stalls](preview-database-stalls.md) — health/session endpoints can pass while SQLite is stuck; verify actual staff login and inbox access.
 - [Python package installation](python-package-installation.md) — this workspace disables pip user installs; verify managed dependency support before adding parsers.
 - [Chat PDF rendering](quote-pdf-rendering.md) — use escaped HTML with headless Chromium for temporary PDFs; custom built-in font PDFs broke multilingual layout.
+- [Quotation review trust](quotation-review-trust.md) — confirmation binds to reviewed content and staff session, not just message IDs or browser checkboxes.
+- [Currency comparison trust](currency-comparison-trust.md) — preserve dated MYR snapshots for earlier choices; never relax date checks to accept a broken “latest” feed.
+- [Staff workspace responsiveness](staff-responsive-layout.md) — size tools for the space beside the inbox; long chat content must wrap and scroll without shrinking its boxes.

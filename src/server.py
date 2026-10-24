@@ -9,10 +9,12 @@ import os
 from pathlib import Path
 import re
 import secrets
+import threading
 import time
 
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, render_template, request, send_file, session
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.serving import WSGIRequestHandler
@@ -21,10 +23,10 @@ from werkzeug.utils import secure_filename
 if __package__:
     from .history_import import HistoryImportError, parse_whatsapp_export
     from .quotation_export import MIME_TYPE as QUOTATION_XLSX_MIME, build_quotation_workbook
-    from .quote_analysis import QuoteAnalysisError, QuoteAnalysisWorker
+    from .quote_analysis import QuoteAnalysisError, QuoteAnalysisWorker, rank_quotes_in_myr
     from .quote_chat import (
         QuoteChatContextTooLarge, QuoteChatInputError, QuoteChatOutputError,
-        parse_model_output, prepare_model_messages,
+        parse_model_output, prepare_model_messages, currency_reference_rows,
     )
     from .quote_chat_pdf import QuoteChatPdfError, build_quote_chat_pdf
     from .storage import Store, StorageBusyError
@@ -32,10 +34,10 @@ if __package__:
 else:
     from history_import import HistoryImportError, parse_whatsapp_export
     from quotation_export import MIME_TYPE as QUOTATION_XLSX_MIME, build_quotation_workbook
-    from quote_analysis import QuoteAnalysisError, QuoteAnalysisWorker
+    from quote_analysis import QuoteAnalysisError, QuoteAnalysisWorker, rank_quotes_in_myr
     from quote_chat import (
         QuoteChatContextTooLarge, QuoteChatInputError, QuoteChatOutputError,
-        parse_model_output, prepare_model_messages,
+        parse_model_output, prepare_model_messages, currency_reference_rows,
     )
     from quote_chat_pdf import QuoteChatPdfError, build_quote_chat_pdf
     from storage import Store, StorageBusyError
@@ -75,8 +77,15 @@ def create_app(config=None):
     quote_worker = app.config.get("QUOTE_WORKER")
     if quote_worker is None:
         quote_worker = QuoteAnalysisWorker(
-            store, app.config["RUNPOD_ENDPOINT_URL"], app.config["RUNPOD_API_KEY"])
+            store, app.config["RUNPOD_ENDPOINT_URL"], app.config["RUNPOD_API_KEY"],
+            rate_provider=app.config.get("MYR_RATE_PROVIDER"))
     app.extensions["quote_worker"] = quote_worker
+    # Separate local reader: preview never uses a provider credential or calls RunPod.
+    quote_reader = QuoteAnalysisWorker(store, app.config["RUNPOD_ENDPOINT_URL"], "")
+    preview_slots = threading.BoundedSemaphore(2)
+    def upgrade_quote_currency():
+        store.upgrade_quote_currency(lambda quotes, priority: rank_quotes_in_myr(
+            quotes, priority, app.config.get("MYR_RATE_PROVIDER")))
     if os.getenv("WHATSAPP_PHONE_NUMBER_ID") and not store.setting("phone_number_id"):
         store.learn_phone(os.environ["WHATSAPP_PHONE_NUMBER_ID"])
     if app.config["MEDIA_WORKER"] and not app.config.get("TESTING"):
@@ -368,9 +377,11 @@ def create_app(config=None):
     @require_staff
     def quote_chat():
         data = json_body()
+        upgrade_quote_currency()
+        quotation_rows = store.quotation_register()
         try:
             messages, comparison_count, quote_count = prepare_model_messages(
-                data.get("messages"), store.quotation_register())
+                data.get("messages"), quotation_rows)
         except QuoteChatInputError as error:
             return jsonify(error=str(error)), 400
         except QuoteChatContextTooLarge as error:
@@ -384,7 +395,8 @@ def create_app(config=None):
         except QuoteChatOutputError as error:
             return jsonify(error=str(error)), 502
         try:
-            pdf = build_quote_chat_pdf(reply, items, comparison_count, quote_count)
+            pdf = build_quote_chat_pdf(reply, items, comparison_count, quote_count,
+                                       price_reference=currency_reference_rows(quotation_rows))
         except QuoteChatPdfError as error:
             return jsonify(error=str(error)), 503
         return jsonify(
@@ -418,15 +430,51 @@ def create_app(config=None):
     @app.get("/api/quote-evaluations")
     @require_staff
     def quote_evaluations():
+        upgrade_quote_currency()
         return jsonify(evaluations=store.quote_evaluations())
+
+    @app.post("/api/quote-previews")
+    @require_staff
+    def preview_quote_sources():
+        data = json_body()
+        try:
+            rows = store.quote_preview_inputs(data.get("message_ids"))
+        except ValueError as error:
+            return jsonify(error=str(error)), 400
+        if not preview_slots.acquire(blocking=False):
+            return jsonify(error="Local extraction is busy. Please try again shortly."), 429
+        try:
+            sources, digests = quote_reader.preview_sources(rows)
+        finally:
+            preview_slots.release()
+        token = URLSafeTimedSerializer(app.secret_key, salt="quote-review-v1").dumps({
+            "sources": digests,
+            "session": hashlib.sha256(csrf_token().encode()).hexdigest(),
+        })
+        return jsonify(sources=sources, review_token=token, expires_in=600)
 
     @app.post("/api/quote-evaluations")
     @require_staff
     def create_quote_evaluation():
         data = json_body()
+        token = data.get("review_token")
+        if not isinstance(token, str) or not token or len(token) > 20000:
+            return jsonify(error="Review and confirm the selected sources before sending them to AI."), 400
+        try:
+            review = URLSafeTimedSerializer(app.secret_key, salt="quote-review-v1").loads(token, max_age=600)
+        except SignatureExpired:
+            return jsonify(error="Your source review expired. Review the sources again."), 409
+        except BadSignature:
+            return jsonify(error="The source review is invalid. Review the sources again."), 400
+        digests = review.get("sources", {})
+        ids = data.get("message_ids")
+        if (review.get("session") != hashlib.sha256(csrf_token().encode()).hexdigest()
+                or not isinstance(ids, list) or not 1 <= len(ids) <= 8
+                or any(not isinstance(item, str) or item not in digests for item in ids)):
+            return jsonify(error="Confirm only sources reviewed in this staff session."), 400
         try:
             evaluation = store.create_quote_evaluation(
-                data.get("message_ids"), data.get("priority"))
+                ids, data.get("priority"), reviewed_digests=digests)
         except ValueError as error:
             return jsonify(error=str(error)), 400
         try:
@@ -441,6 +489,7 @@ def create_app(config=None):
     @app.get("/api/quote-evaluations/<int:evaluation_id>")
     @require_staff
     def get_quote_evaluation(evaluation_id):
+        upgrade_quote_currency()
         evaluation = store.quote_evaluation(evaluation_id)
         if not evaluation:
             return jsonify(error="Quote comparison not found. It may have been removed with chat history."), 404
@@ -478,6 +527,7 @@ def create_app(config=None):
     @app.get("/api/quotation-register")
     @require_staff
     def quotation_register():
+        upgrade_quote_currency()
         rows = store.quotation_register()
         response = jsonify(rows=rows, total=len(rows))
         response.headers["Cache-Control"] = "private, no-store"
@@ -486,6 +536,7 @@ def create_app(config=None):
     @app.get("/api/quotation-register.xlsx")
     @require_staff
     def export_quotation_register():
+        upgrade_quote_currency()
         workbook = build_quotation_workbook(store.quotation_register())
         response = send_file(
             BytesIO(workbook), mimetype=QUOTATION_XLSX_MIME, as_attachment=True,

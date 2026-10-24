@@ -36,6 +36,9 @@
       evaluations: [],
       loading: true,
       submitting: false,
+      reviewing: false,
+      review: null,
+      confirmed: new Set(),
       error: "",
       pollTimer: null,
       cancellingId: null,
@@ -105,7 +108,7 @@
       disclosure.setAttribute("role", "note");
       disclosure.append(el("span", "qe-disclosure-mark", "i"));
       const disclosureCopy = el("p", "qe-disclosure-copy");
-      disclosureCopy.append(el("strong", "", "Before analysis: "), document.createTextNode("selected quotation content is sent to RunPod for analysis. No WhatsApp reply is sent, and no quote is accepted automatically."));
+      disclosureCopy.append(el("strong", "", "Before analysis: "), document.createTextNode("review the locally extracted text, then explicitly confirm which sources to send to RunPod. Previewing does not contact AI. No WhatsApp reply is sent."));
       disclosure.appendChild(disclosureCopy);
 
       const layout = el("div", "qe-layout");
@@ -157,8 +160,8 @@
         priorities.appendChild(choice);
       });
       controls.appendChild(priorities);
-      const startButton = button(state.submitting ? "Starting analysis…" : "Analyze selected", "qe-primary-button", startEvaluation);
-      startButton.disabled = state.submitting || state.loading || state.selected.size < 1 || Boolean(state.evaluation && isActive(state.evaluation));
+      const startButton = button(state.reviewing ? "Extracting locally…" : "Review selected", "qe-primary-button", reviewSelection);
+      startButton.disabled = state.reviewing || state.submitting || state.loading || state.selected.size < 1 || Boolean(state.evaluation && isActive(state.evaluation));
       controls.appendChild(startButton);
       controls.appendChild(el("p", "qe-control-note", "Analysis extracts terms and evidence; it does not decide on your behalf."));
       if (state.error && state.candidates.length) {
@@ -169,9 +172,55 @@
 
       layout.append(selectionPanel, controls);
       root.append(header, intro, disclosure, layout);
+      if (state.review) root.appendChild(renderReview());
       if (state.evaluations.length) root.appendChild(renderRecentEvaluations());
       if (state.evaluation) root.appendChild(renderEvaluation(state.evaluation));
       container.replaceChildren(root);
+
+      function renderReview() {
+        const section = el("section", "qe-panel qe-review");
+        section.setAttribute("aria-label", "Review extracted sources");
+        section.appendChild(sectionHeading("03", "Review before sending", "Local extraction only"));
+        section.appendChild(el("p", "qe-panel-hint", "Check the extracted text for mistakes. Tick only the sources you approve. Reviews expire after 10 minutes; originals are never edited."));
+        (state.review.sources || []).forEach((source) => {
+          const article = el("article", "qe-review-source");
+          const label = el("label", "qe-review-confirm");
+          const checkbox = el("input");
+          checkbox.type = "checkbox";
+          checkbox.checked = state.confirmed.has(source.id);
+          checkbox.disabled = Boolean(source.error) || state.submitting;
+          checkbox.setAttribute("aria-label", `Confirm ${source.filename || source.client_name || source.id}`);
+          checkbox.addEventListener("change", () => {
+            if (checkbox.checked) state.confirmed.add(source.id);
+            else state.confirmed.delete(source.id);
+            render();
+          });
+          label.append(checkbox, el("strong", "", source.filename || source.client_name || "Quotation"));
+          article.appendChild(label);
+          if (source.error) {
+            const error = el("p", "qe-inline-error", source.error);
+            error.setAttribute("role", "alert");
+            article.appendChild(error);
+          } else {
+            article.appendChild(el("pre", "qe-review-text", source.text));
+            if (source.media_kind) {
+              article.appendChild(el("p", "qe-panel-hint", "This image or voice attachment is sent unchanged alongside the text above. Check the original before confirming; this preview does not transcribe it."));
+            }
+          }
+          if (source.filename || source.media_kind) {
+            const original = el("a", "qe-link-button", "Open original attachment");
+            original.href = `/api/media/${encodeURIComponent(source.id)}`;
+            original.target = "_blank";
+            original.rel = "noopener noreferrer";
+            article.appendChild(original);
+          }
+          section.appendChild(article);
+        });
+        const send = button(state.submitting ? "Starting analysis…" : `Send confirmed to AI (${state.confirmed.size})`, "qe-primary-button", startEvaluation);
+        send.disabled = !state.confirmed.size || state.submitting || state.loading || Boolean(state.evaluation && isActive(state.evaluation));
+        section.appendChild(send);
+        return section;
+      }
 
       function renderRecentEvaluations() {
         const section = el("section", "qe-panel qe-history");
@@ -196,11 +245,13 @@
         const checkbox = el("input", "qe-checkbox");
         checkbox.type = "checkbox";
         checkbox.checked = state.selected.has(candidate.id);
-        checkbox.disabled = !isSelectable(candidate) || (!checkbox.checked && state.selected.size >= MAX_SELECTION) || state.submitting;
+        checkbox.disabled = !isSelectable(candidate) || (!checkbox.checked && state.selected.size >= MAX_SELECTION) || state.submitting || state.reviewing;
         checkbox.setAttribute("aria-label", `${candidateLabel(candidate)}${isSelectable(candidate) ? "" : ", unavailable"}`);
         checkbox.addEventListener("change", () => {
           if (checkbox.checked) state.selected.add(candidate.id);
           else state.selected.delete(candidate.id);
+          state.review = null;
+          state.confirmed.clear();
           render();
         });
         const sourceMark = el("span", "qe-source-mark", isAttachment(candidate) ? "FILE" : "TEXT");
@@ -268,7 +319,7 @@
             const table = el("table", "qe-table");
             const thead = el("thead");
             const headerRow = el("tr");
-            ["Rank", "Quotation", "Total", "Delivery", "Confidence", "Evidence"].forEach((heading) => headerRow.appendChild(el("th", "", heading)));
+            ["Rank", "Quotation", "Total (MYR)", "Delivery", "Confidence", "Evidence"].forEach((heading) => headerRow.appendChild(el("th", "", heading)));
             thead.appendChild(headerRow);
             const tbody = el("tbody");
             quotes.forEach((quote) => tbody.appendChild(renderQuoteRow(quote, evaluation, result.recommendation_message_id)));
@@ -303,7 +354,7 @@
         vendorCell.append(el("strong", "", quote.vendor || quote.client_name || quote.filename || "Quotation"), el("small", "", [quote.client_name, quote.filename].filter(Boolean).join(" · ")));
         if (quote.extraction_error) vendorCell.appendChild(el("small", "qe-warning", quote.extraction_error));
         row.appendChild(vendorCell);
-        row.appendChild(el("td", "qe-price", money(quote.currency, quote.total_price)));
+        row.appendChild(priceBlock(quote, "td", "qe-price"));
         row.appendChild(el("td", "", delivery(quote)));
         row.appendChild(el("td", "", quote.confidence == null ? "Not stated" : `${Math.round(Number(quote.confidence) * 100)}%`));
         const evidenceCell = el("td", "qe-evidence-cell");
@@ -328,7 +379,7 @@
         const label = el("div", "");
         label.append(el("span", "qe-quote-rank", quote.rank ? `#${quote.rank}` : "Quotation"), el("h3", "", quote.vendor || quote.client_name || quote.filename || "Quotation"));
         if (String(quote.message_id) === String(recommendedId)) label.appendChild(el("span", "qe-recommended", "Suggested for selected priority"));
-        top.append(label, el("strong", "qe-card-price", money(quote.currency, quote.total_price)));
+        top.append(label, priceBlock(quote, "div", "qe-card-price"));
         card.appendChild(top);
         const facts = el("div", "qe-card-facts");
         facts.append(fact("Delivery", delivery(quote)), fact("Confidence", quote.confidence == null ? "Not stated" : `${Math.round(Number(quote.confidence) * 100)}%`), fact("Price basis", quote.price_basis || "Not stated"));
@@ -388,12 +439,25 @@
     function isActive(evaluation) {
       return evaluation.status === "queued" || evaluation.status === "processing";
     }
+    function priceBlock(quote, tag, className) {
+      const block = el(tag, className);
+      block.appendChild(el("strong", "", quote.myr_total_price == null ? "MYR unavailable" : money("MYR", quote.myr_total_price)));
+      if (quote.currency !== "MYR" && quote.total_price != null) {
+        block.appendChild(el("small", "qe-price-detail", `Original: ${money(quote.currency, quote.total_price)}`));
+      }
+      if (quote.exchange_rate_date) {
+        block.appendChild(el("small", "qe-price-detail",
+          `1 ${quote.currency} = MYR ${Number(quote.exchange_rate).toLocaleString(undefined, { maximumFractionDigits: 6 })} · ${quote.exchange_rate_date} · ${quote.exchange_rate_source}`));
+      }
+      if (quote.conversion_error) block.appendChild(el("small", "qe-price-detail qe-warning", quote.conversion_error));
+      return block;
+    }
     function money(currency, value) {
       if (value === null || value === undefined || value === "") return "Not stated";
       const number = Number(value);
       if (!Number.isFinite(number)) return `${currency ? `${currency} ` : ""}${value}`;
       try {
-        return new Intl.NumberFormat(undefined, { style: currency ? "currency" : "decimal", currency: currency || undefined, maximumFractionDigits: 2 }).format(number);
+        return new Intl.NumberFormat(undefined, { style: currency ? "currency" : "decimal", currency: currency || undefined, currencyDisplay: "code", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(number);
       } catch (_) {
         return `${currency ? `${currency} ` : ""}${number.toLocaleString()}`;
       }
@@ -414,6 +478,9 @@
     }
 
     async function loadCandidates() {
+      if (state.reviewing || state.submitting) return;
+      state.review = null;
+      state.confirmed.clear();
       state.loading = true;
       state.error = "";
       render();
@@ -442,19 +509,46 @@
       }
     }
 
+    async function reviewSelection() {
+      if (state.submitting || state.reviewing || !state.selected.size) return;
+      state.reviewing = true;
+      state.review = null;
+      state.confirmed.clear();
+      state.error = "";
+      render();
+      try {
+        const response = await request("/api/quote-previews", {
+          method: "POST", body: { message_ids: Array.from(state.selected) }
+        });
+        if (!state.destroyed) state.review = response;
+      } catch (error) {
+        state.error = error && error.message ? error.message : "Could not extract the selected sources.";
+      } finally {
+        state.reviewing = false;
+        if (!state.destroyed) {
+          render();
+          const review = container.querySelector(".qe-review");
+          if (review) review.scrollIntoView({ block: "start", behavior: "smooth" });
+        }
+      }
+    }
+
     async function startEvaluation() {
-      if (state.submitting || !state.selected.size) return;
+      if (state.submitting || !state.review || !state.confirmed.size) return;
       state.submitting = true;
       state.error = "";
       render();
       try {
         const response = await request("/api/quote-evaluations", {
           method: "POST",
-          body: { message_ids: Array.from(state.selected), priority: state.priority }
+          body: { message_ids: Array.from(state.confirmed), priority: state.priority,
+            review_token: state.review.review_token }
         });
         state.evaluation = response && response.evaluation;
         if (!state.evaluation || !state.evaluation.id) throw new Error("The analysis could not be started.");
         rememberEvaluation(state.evaluation);
+        state.review = null;
+        state.confirmed.clear();
         toast("Quotation analysis started.");
         render();
         if (isActive(state.evaluation)) pollEvaluation(state.evaluation.id);

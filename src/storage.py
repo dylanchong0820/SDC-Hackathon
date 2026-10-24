@@ -108,6 +108,9 @@ class Store:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(conversations)")}
             if "history_revision" not in columns:
                 db.execute("ALTER TABLE conversations ADD COLUMN history_revision INTEGER NOT NULL DEFAULT 0")
+            source_columns = {row["name"] for row in db.execute("PRAGMA table_info(quote_evaluation_sources)")}
+            if "reviewed_digest" not in source_columns:
+                db.execute("ALTER TABLE quote_evaluation_sources ADD COLUMN reviewed_digest TEXT")
             db.execute("""
                 UPDATE quote_evaluations
                 SET status='failed', error='The server restarted before analysis finished.',
@@ -250,7 +253,25 @@ class Store:
             })
         return candidates
 
-    def create_quote_evaluation(self, message_ids, priority):
+    def quote_preview_inputs(self, message_ids):
+        if (not isinstance(message_ids, list) or not 1 <= len(message_ids) <= 8
+                or any(not isinstance(item, str) or not item or len(item) > 200 for item in message_ids)):
+            raise ValueError("Select between 1 and 8 valid client messages or attachments.")
+        ids = list(dict.fromkeys(message_ids))
+        with self.db() as db:
+            rows = db.execute(f"""
+                SELECT m.*,c.name AS client_name FROM messages m
+                JOIN conversations c ON c.id=m.conversation_id
+                WHERE m.id IN ({','.join('?' for _ in ids)})
+            """, ids).fetchall()
+        by_id = {row["id"]: dict(row) for row in rows}
+        if len(by_id) != len(ids):
+            raise ValueError("One or more selected messages are no longer available.")
+        if any(row["direction"] != "inbound" for row in rows):
+            raise ValueError("Only client messages can be reviewed.")
+        return [by_id[item] for item in ids]
+
+    def create_quote_evaluation(self, message_ids, priority, reviewed_digests=None):
         if priority not in {"price", "time", "balanced"}:
             raise ValueError("Choose price, delivery time, or balanced comparison.")
         if not isinstance(message_ids, list) or not 1 <= len(message_ids) <= 8:
@@ -293,9 +314,10 @@ class Store:
             evaluation_id = cursor.lastrowid
             db.executemany("""
                 INSERT INTO quote_evaluation_sources
-                    (evaluation_id,message_id,conversation_id,position)
-                VALUES (?,?,?,?)
-            """, [(evaluation_id, message_id, by_id[message_id]["conversation_id"], position)
+                    (evaluation_id,message_id,conversation_id,position,reviewed_digest)
+                VALUES (?,?,?,?,?)
+            """, [(evaluation_id, message_id, by_id[message_id]["conversation_id"], position,
+                   (reviewed_digests or {}).get(message_id))
                   for position, message_id in enumerate(ids)])
         return self.quote_evaluation(evaluation_id)
 
@@ -307,7 +329,7 @@ class Store:
             if not evaluation:
                 return None
             rows = db.execute("""
-                SELECT m.*,c.name AS client_name,c.wa_id
+                SELECT m.*,c.name AS client_name,c.wa_id,s.reviewed_digest
                 FROM quote_evaluation_sources s
                 JOIN messages m ON m.id=s.message_id
                 JOIN conversations c ON c.id=s.conversation_id
@@ -378,6 +400,31 @@ class Store:
             result.append(item)
         return result
 
+    def upgrade_quote_currency(self, converter):
+        """Upgrade old snapshots without changing team choices or analysis dates."""
+        with self.db() as db:
+            rows = db.execute(
+                "SELECT id,priority,result_json FROM quote_evaluations WHERE status='completed'"
+            ).fetchall()
+        for row in rows:
+            try:
+                result = json.loads(row["result_json"] or "{}")
+                quotes = result.get("quotes", [])
+                if not quotes or not isinstance(quotes, list):
+                    continue
+                retry = any(item.get("conversion_error") for item in quotes)
+                if result.get("myr_version") == 1 and (
+                        not retry or time.time() - result.get("fx_checked_at", 0) < 60):
+                    continue
+                converted = converter(quotes, row["priority"])
+            except (ValueError, TypeError, AttributeError):
+                continue
+            with self.db() as db:
+                db.execute("""
+                    UPDATE quote_evaluations SET result_json=?
+                    WHERE id=? AND status='completed' AND result_json=?
+                """, (json.dumps(converted, ensure_ascii=False), row["id"], row["result_json"]))
+
     def quotation_register(self):
         """Return one row per source in every completed comparison."""
         with self.db() as db:
@@ -433,6 +480,11 @@ class Store:
                 "vendor": quote.get("vendor") or "",
                 "total_price": quote.get("total_price"),
                 "currency": quote.get("currency") or "",
+                "myr_total_price": quote.get("myr_total_price"),
+                "exchange_rate": quote.get("exchange_rate"),
+                "exchange_rate_date": quote.get("exchange_rate_date") or "",
+                "exchange_rate_source": quote.get("exchange_rate_source") or "",
+                "conversion_error": quote.get("conversion_error") or "",
                 "price_basis": quote.get("price_basis") or "",
                 "delivery_days": quote.get("delivery_days"),
                 "delivery_unit": quote.get("delivery_unit") or "",

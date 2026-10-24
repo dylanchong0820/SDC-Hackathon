@@ -20,6 +20,11 @@ COLUMNS = (
     ("Message type", "message_type"),
     ("Total price", "total_price"),
     ("Currency", "currency"),
+    ("Price (MYR / RM)", "myr_total_price"),
+    ("MYR per original currency unit", "exchange_rate"),
+    ("Exchange rate date", "exchange_rate_date"),
+    ("Exchange rate source", "exchange_rate_source"),
+    ("Currency conversion warning", "conversion_error"),
     ("Price basis", "price_basis"),
     ("Delivery days", "delivery_days"),
     ("Delivery unit", "delivery_unit"),
@@ -37,6 +42,7 @@ COLUMNS = (
 )
 
 NUMERIC_FIELDS = {
+    "myr_total_price", "exchange_rate",
     "comparison_id", "total_price", "delivery_days", "rank", "confidence"
 }
 BOOLEAN_FIELDS = {"recommended", "team_choice"}
@@ -108,7 +114,7 @@ def _worksheet_xml(rows):
         for index, (title, _) in enumerate(COLUMNS, start=1)
     )
     header_cells = "".join(
-        _cell_xml(f"{_column_name(index)}1", key, title, style=1)
+        _cell_xml(f"{_column_name(index)}1", "", title, style=1)
         for index, (title, key) in enumerate(COLUMNS, start=1)
     )
     data_xml = []

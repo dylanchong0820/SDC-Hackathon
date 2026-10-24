@@ -1,6 +1,7 @@
 """Extract and compare explicitly selected WhatsApp quotations."""
 import base64
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -21,6 +22,10 @@ from urllib.parse import urlparse
 
 import requests
 
+if __package__:
+    from .quote_currency import convert_quote, get_myr_rates
+else:
+    from quote_currency import convert_quote, get_myr_rates
 
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 MAX_MEDIA_BYTES = 5 * 1024 * 1024
@@ -41,8 +46,27 @@ class QuoteAnalysisError(RuntimeError):
     """A safe, user-facing analysis error without source content or credentials."""
 
 
+def quote_source_digest(parts):
+    normalized = [dict(part) for part in parts]
+    if normalized and normalized[0].get("type") == "text":
+        # Quote numbering is assigned after staff choose their confirmed subset.
+        normalized[0]["text"] = normalized[0]["text"].partition("\n")[2]
+    return hashlib.sha256(
+        json.dumps(normalized, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _bounded_text(value, limit=MAX_EXTRACTED_CHARS):
     return str(value or "").replace("\x00", "")[:limit]
+
+
+def _reading_timeout(limit, deadline=None):
+    if deadline is None:
+        return limit
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise QuoteAnalysisError("Local review reached its two-minute limit. Review fewer sources at a time.")
+    return min(limit, remaining)
 
 
 @contextmanager
@@ -143,7 +167,7 @@ def _xlsx_text(path):
     return _bounded_text("\n".join(output))
 
 
-def _xls_text(path):
+def _xls_text(path, deadline=None):
     try:
         if path.stat().st_size > MAX_DOCUMENT_BYTES:
             raise QuoteAnalysisError("This legacy Excel file exceeds the 20 MB local-reading limit.")
@@ -156,7 +180,7 @@ def _xls_text(path):
             result = subprocess.run(
                 ["ssconvert", str(path), str(converted)],
                 capture_output=True,
-                timeout=MAX_XLS_CONVERT_SECONDS,
+                timeout=_reading_timeout(MAX_XLS_CONVERT_SECONDS, deadline),
                 check=False,
             )
         except subprocess.TimeoutExpired:
@@ -181,8 +205,8 @@ def _xls_text(path):
         return _xlsx_text(converted)
 
 
-def _ocr_pdf(path):
-    deadline = time.monotonic() + MAX_OCR_SECONDS
+def _ocr_pdf(path, deadline=None):
+    deadline = min(deadline or float("inf"), time.monotonic() + MAX_OCR_SECONDS)
     with tempfile.TemporaryDirectory(prefix="quote-pdf-ocr-") as temporary_directory:
         prefix = Path(temporary_directory) / "page"
         try:
@@ -266,7 +290,7 @@ def _ocr_pdf(path):
     )
 
 
-def _document_text(path, mime_type):
+def _document_text(path, mime_type, deadline=None):
     extension = path.suffix.lower()
     mime_type = (mime_type or mimetypes.guess_type(path.name)[0] or "").split(";", 1)[0].lower()
 
@@ -300,12 +324,13 @@ def _document_text(path, mime_type):
         return _xlsx_text(path)
 
     if extension == ".xls":
-        return _xls_text(path)
+        return _xls_text(path, deadline)
 
     if extension == ".doc":
         try:
             result = subprocess.run(
-                ["antiword", str(path)], capture_output=True, timeout=25, check=False)
+                ["antiword", str(path)], capture_output=True,
+                timeout=_reading_timeout(25, deadline), check=False)
         except (OSError, subprocess.TimeoutExpired):
             raise QuoteAnalysisError("Could not read this legacy Word document. Convert it to DOCX.") from None
         if result.returncode != 0:
@@ -317,7 +342,7 @@ def _document_text(path, mime_type):
             result = subprocess.run(
                 ["pdftotext", "-layout", "-enc", "UTF-8", "-f", "1",
                  "-l", str(MAX_PDF_PAGES), str(path), "-"],
-                capture_output=True, timeout=25, check=False,
+                capture_output=True, timeout=_reading_timeout(25, deadline), check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
             raise QuoteAnalysisError("Could not read this PDF. Convert it to a text-based PDF or DOCX.") from None
@@ -325,7 +350,7 @@ def _document_text(path, mime_type):
             raise QuoteAnalysisError("Could not extract text from this PDF.")
         extracted = _bounded_text(result.stdout.decode("utf-8", errors="replace"))
         if not extracted.strip():
-            return _ocr_pdf(path)
+            return _ocr_pdf(path, deadline)
         return extracted
 
     raise QuoteAnalysisError(
@@ -426,9 +451,9 @@ def _normalize_model_quote(raw, key, candidate):
     }
 
 
-def rank_quotes(quotes, priority):
+def rank_quotes(quotes, priority, conversion_rates=None):
     """Rank extracted fields deterministically; the model does not set the winner."""
-    items = [dict(quote) for quote in quotes]
+    items = [convert_quote(quote, conversion_rates or {}) for quote in quotes]
     limitations = []
     price_currencies = sorted({
         item["currency"] for item in items
@@ -438,17 +463,21 @@ def rank_quotes(quotes, priority):
         metric[0] for item in items
         for metric in [_time_metric(item)] if metric is not None
     })
-    mixed_price = priority in {"price", "balanced"} and len(price_currencies) > 1
+    mixed_price = priority in {"price", "balanced"} and any(
+        item.get("total_price") is not None and item.get("myr_total_price") is None
+        for item in items if not item.get("extraction_error"))
     mixed_time = priority in {"time", "balanced"} and len(time_units) > 1
     if mixed_price:
-        limitations.append("Prices use different currencies; no exchange-rate conversion was applied.")
+        limitations.append("Some prices cannot be converted to MYR. No overall price recommendation is made until their currencies or exchange rates are available.")
+    if any(item.get("exchange_rate_date") for item in items):
+        limitations.append("Foreign prices use dated Frankfurter reference rates, rounded to MYR cents. Bank fees and actual payment rates may differ.")
     if mixed_time:
         limitations.append("Delivery estimates use different day types; they are not ranked against each other.")
 
     usable = [item for item in items if not item.get("extraction_error")]
     complete = []
     for item in usable:
-        has_price = item.get("total_price") is not None and bool(item.get("currency"))
+        has_price = item.get("myr_total_price") is not None
         has_time = _time_metric(item) is not None
         if priority == "price":
             include = has_price and not mixed_price
@@ -463,7 +492,7 @@ def rank_quotes(quotes, priority):
 
     score_by_id = {}
     if priority == "price" and complete:
-        ordered = sorted(complete, key=lambda item: (item["total_price"], item["message_id"]))
+        ordered = sorted(complete, key=lambda item: (item["myr_total_price"], item["message_id"]))
         for index, item in enumerate(ordered):
             item["comparable"] = True
             score_by_id[item["message_id"]] = index / max(1, len(ordered) - 1)
@@ -473,16 +502,18 @@ def rank_quotes(quotes, priority):
             item["comparable"] = True
             score_by_id[item["message_id"]] = index / max(1, len(ordered) - 1)
     elif priority == "balanced" and complete:
-        by_price = sorted(complete, key=lambda item: (item["total_price"], item["message_id"]))
+        by_price = sorted(complete, key=lambda item: (item["myr_total_price"], item["message_id"]))
         by_time = sorted(complete, key=lambda item: (_time_metric(item)[1], item["message_id"]))
-        price_rank = {item["message_id"]: rank for rank, item in enumerate(by_price)}
-        time_rank = {item["message_id"]: rank for rank, item in enumerate(by_time)}
-        denominator = max(1, len(complete) - 1)
+        # Equal prices or delivery times must receive equal scores.
+        price_values = sorted({item["myr_total_price"] for item in by_price})
+        time_values = sorted({_time_metric(item)[1] for item in by_time})
+        price_rank = {value: rank for rank, value in enumerate(price_values)}
+        time_rank = {value: rank for rank, value in enumerate(time_values)}
         for item in complete:
             item["comparable"] = True
             score_by_id[item["message_id"]] = (
-                price_rank[item["message_id"]] / denominator
-                + time_rank[item["message_id"]] / denominator
+                price_rank[item["myr_total_price"]] / max(1, len(price_values) - 1)
+                + time_rank[_time_metric(item)[1]] / max(1, len(time_values) - 1)
             ) / 2
 
     if priority == "price" and len(price_currencies) == 0:
@@ -513,7 +544,7 @@ def rank_quotes(quotes, priority):
         item["recommended"] = item["message_id"] == recommendation_id
     if recommendation_id:
         summary = {
-            "price": "The lowest comparable total price is ranked first.",
+            "price": "The lowest comparable total price in Malaysian Ringgit (MYR) is ranked first.",
             "time": "The fastest comparable delivery estimate is ranked first.",
             "balanced": "Price and delivery time are weighted equally using normalized ranks.",
         }[priority]
@@ -524,13 +555,23 @@ def rank_quotes(quotes, priority):
         "recommendation_message_id": recommendation_id,
         "summary": summary,
         "limitations": limitations,
+        "myr_version": 1,
+        "fx_checked_at": int(time.time()),
     }
+
+
+def rank_quotes_in_myr(quotes, priority, rate_provider=None):
+    foreign = any(item.get("total_price") is not None and item.get("currency")
+                  and item["currency"] != "MYR" for item in quotes)
+    rates = (rate_provider or get_myr_rates)() if foreign else {}
+    return rank_quotes(quotes, priority, rates)
 
 
 class QuoteAnalysisWorker:
     """Bounded background workers for RunPod requests; source data stays off logs."""
 
-    def __init__(self, store, endpoint_url, api_key, model_timeout=180, request_timeout=240):
+    def __init__(self, store, endpoint_url, api_key, model_timeout=180, request_timeout=240,
+                 rate_provider=None):
         self.store = store
         self.endpoint_error = ""
         try:
@@ -546,6 +587,7 @@ class QuoteAnalysisWorker:
         self.cancel_events = {}
         self.lock = threading.Lock()
         self.model_id = None
+        self.rate_provider = rate_provider
 
     @staticmethod
     def _validate_endpoint(endpoint_url):
@@ -640,7 +682,39 @@ class QuoteAnalysisWorker:
         self.model_id = model_id
         return model_id
 
-    def _prepare_message(self, row, quote_key, media_total):
+    def preview_sources(self, rows):
+        """Read locally only: never invokes model discovery or inference."""
+        previews, digests = [], {}
+        media_total, total_text = 0, 0
+        deadline = time.monotonic() + 120
+        for row in rows:
+            # A fixed key lets staff confirm a subset without changing the digest.
+            preview = {
+                "id": row["id"], "client_name": row.get("client_name", ""),
+                "filename": row.get("filename", ""), "text": "", "error": "",
+            }
+            try:
+                _reading_timeout(120, deadline)
+                _, parts, next_media_total = self._prepare_message(
+                    row, "REVIEW", media_total, deadline=deadline)
+                _reading_timeout(120, deadline)
+                text = "\n".join(part["text"] for part in parts if part.get("type") == "text")
+                if total_text + len(text) > MAX_TOTAL_TEXT_CHARS:
+                    raise QuoteAnalysisError("Selected quotation text exceeds the combined analysis limit.")
+                preview["text"] = text
+                preview["media_kind"] = next(
+                    (part["type"] for part in parts if part.get("type") != "text"), None)
+                digests[row["id"]] = quote_source_digest(parts)
+                total_text += len(text)
+                media_total = next_media_total
+            except QuoteAnalysisError as error:
+                preview["error"] = str(error)
+            except OSError:
+                preview["error"] = "This source could not be read. Refresh the sources and try again."
+            previews.append(preview)
+        return previews, digests
+
+    def _prepare_message(self, row, quote_key, media_total, deadline=None):
         candidate = {
             "id": row["id"],
             "client_name": row.get("client_name") or "",
@@ -691,11 +765,11 @@ class QuoteAnalysisWorker:
             else:
                 if size > MAX_DOCUMENT_BYTES:
                     raise QuoteAnalysisError("This document exceeds the local text extraction size limit.")
-                extracted = _document_text(path, mime_type)
+                extracted = _document_text(path, mime_type, deadline=deadline)
                 if not extracted.strip():
                     raise QuoteAnalysisError("No readable text was found in this document.")
                 prompt_text.append(f"Extracted document text:\n{extracted}")
-        if not body and not caption and not parts:
+        if len(prompt_text) == 1 and not parts:
             raise QuoteAnalysisError("This client message has no readable text or saved quotation file.")
         parts.insert(0, {"type": "text", "text": "\n".join(prompt_text)})
         return candidate, parts, media_total
@@ -838,6 +912,10 @@ class QuoteAnalysisWorker:
             quote_key = f"QUOTE_{index}"
             try:
                 candidate, parts, media_total = self._prepare_message(row, quote_key, media_total)
+                if row.get("reviewed_digest"):
+                    if quote_source_digest(parts) != row["reviewed_digest"]:
+                        raise QuoteAnalysisError(
+                            "This source changed after review. Review it again before sending it to AI.")
                 text_part = next((part.get("text", "") for part in parts if part.get("type") == "text"), "")
                 total_text += len(text_part)
                 if total_text > MAX_TOTAL_TEXT_CHARS:
@@ -880,6 +958,6 @@ class QuoteAnalysisWorker:
             else:
                 quote = _normalize_model_quote(returned.get(quote_key), quote_key, candidate)
             quotes.append(quote)
-        result = rank_quotes(quotes, current["evaluation"]["priority"])
+        result = rank_quotes_in_myr(quotes, current["evaluation"]["priority"], self.rate_provider)
         self.store.update_quote_evaluation(evaluation_id, "completed", result=result)
 

@@ -124,8 +124,11 @@ class QuoteAnalysisTests(unittest.TestCase):
             "message_ids": ["quote-one"], "priority": "random"})
         self.assertEqual(invalid.status_code, 400)
 
+        review = self.post("/api/quote-previews", {"message_ids": ["quote-one"]})
+        self.assertEqual(review.status_code, 200)
         started = self.post("/api/quote-evaluations", {
-            "message_ids": ["quote-one"], "priority": "price"})
+            "message_ids": ["quote-one"], "priority": "price",
+            "review_token": review.json["review_token"]})
         self.assertEqual(started.status_code, 202)
         evaluation_id = started.json["evaluation"]["id"]
         self.assertEqual(self.worker.jobs, [evaluation_id])
@@ -157,6 +160,99 @@ class QuoteAnalysisTests(unittest.TestCase):
 
         self.store.clear_history(self.conversation["id"], delete_attachments=False)
         self.assertIsNone(self.store.quote_evaluation(evaluation["id"]))
+
+    def test_review_is_private_local_and_preserves_original_attachments(self):
+        self.add_message("review-doc", kind="document", filename="quotation.txt", mime_type="text/plain")
+        path = self.store.attachments / "quotation.txt"
+        original = b"Vendor Test <script>alert(1)</script>\nMYR 123, 4 days."
+        path.write_bytes(original)
+        self.store.media_saved(self.store.message("review-doc"), path, "text/plain", "quotation.txt")
+        body = {"message_ids": ["review-doc"]}
+        self.assertEqual(self.post("/api/quote-previews", body).status_code, 401)
+        self.login()
+        self.assertEqual(self.client.post("/api/quote-previews", json=body).status_code, 403)
+        with patch("src.quote_analysis.requests.get") as get, patch("src.quote_analysis.requests.post") as post:
+            response = self.post("/api/quote-previews", body)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("MYR 123", response.json["sources"][0]["text"])
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.worker.jobs, [])
+        get.assert_not_called()
+        post.assert_not_called()
+        self.assertEqual(self.post("/api/quote-evaluations", {
+            "message_ids": ["review-doc"], "priority": "price"}).status_code, 400)
+
+    def test_only_confirmed_reviewed_subset_is_sent_to_model(self):
+        self.login()
+        self.add_message("unconfirmed", "PRIVATE NOT CONFIRMED MYR 999")
+        self.add_message("confirmed", "MYR 123, delivery in 4 days")
+        review = self.post("/api/quote-previews", {"message_ids": ["unconfirmed", "confirmed"]})
+        started = self.post("/api/quote-evaluations", {
+            "message_ids": ["confirmed"], "priority": "price",
+            "review_token": review.json["review_token"]})
+        self.assertEqual(started.status_code, 202)
+        worker = QuoteAnalysisWorker(self.store, "https://example.api.runpod.ai", "test-key")
+        with patch.object(worker, "_request_model", return_value={"quotes": [{
+            "quote_key": "QUOTE_1", "vendor": "Test", "currency": "MYR", "total_price": 123,
+        }]}) as model:
+            worker._analyze(started.json["evaluation"]["id"])
+        payload = str(model.call_args.args[0])
+        self.assertIn("MYR 123", payload)
+        self.assertNotIn("PRIVATE NOT CONFIRMED", payload)
+        self.assertEqual(self.store.quote_evaluation(started.json["evaluation"]["id"])["status"], "completed")
+
+    def test_failed_or_unreviewed_sources_cannot_be_confirmed(self):
+        self.login()
+        self.add_message("good", "MYR 123")
+        self.add_message("other", "MYR 999")
+        self.add_message("bad", kind="document", filename="broken.xyz")
+        path = self.store.attachments / "broken.xyz"
+        path.write_bytes(b"not a readable document")
+        self.store.media_saved(self.store.message("bad"), path, "application/octet-stream", "broken.xyz")
+        review = self.post("/api/quote-previews", {"message_ids": ["good", "bad"]})
+        self.assertTrue(review.json["sources"][1]["error"])
+        for ids in (["bad"], ["other"]):
+            response = self.post("/api/quote-evaluations", {
+                "message_ids": ids, "priority": "price", "review_token": review.json["review_token"]})
+            self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.worker.jobs, [])
+
+    def test_review_tokens_expire_and_are_session_bound(self):
+        from itsdangerous import URLSafeTimedSerializer
+
+        self.login()
+        self.add_message("review-token", "MYR 123")
+        review = self.post("/api/quote-previews", {"message_ids": ["review-token"]})
+        serializer = URLSafeTimedSerializer(self.app.secret_key, salt="quote-review-v1")
+        payload = serializer.loads(review.json["review_token"])
+        with patch("itsdangerous.timed.TimestampSigner.get_timestamp", return_value=int(time.time()) - 601):
+            expired = serializer.dumps(payload)
+        data = {"message_ids": ["review-token"], "priority": "price",
+                "review_token": expired}
+        self.assertEqual(self.post("/api/quote-evaluations", data).status_code, 409)
+        data["review_token"] = review.json["review_token"]
+        self.login()  # new session and CSRF token, same shared password
+        self.assertEqual(self.post("/api/quote-evaluations", data).status_code, 400)
+        data["review_token"] += "tampered"
+        self.assertEqual(self.post("/api/quote-evaluations", data).status_code, 400)
+
+    def test_source_changes_after_review_are_not_sent(self):
+        self.login()
+        self.add_message("changed", kind="document", filename="changed.txt", mime_type="text/plain")
+        path = self.store.attachments / "changed.txt"
+        path.write_text("MYR 100", encoding="utf-8")
+        self.store.media_saved(self.store.message("changed"), path, "text/plain", "changed.txt")
+        review = self.post("/api/quote-previews", {"message_ids": ["changed"]})
+        started = self.post("/api/quote-evaluations", {
+            "message_ids": ["changed"], "priority": "price",
+            "review_token": review.json["review_token"]})
+        path.write_text("MYR 999", encoding="utf-8")
+        worker = QuoteAnalysisWorker(self.store, "https://example.api.runpod.ai", "test-key")
+        with patch.object(worker, "_request_model") as model:
+            with self.assertRaisesRegex(QuoteAnalysisError, "changed after review"):
+                worker._analyze(started.json["evaluation"]["id"])
+        model.assert_not_called()
 
     def test_scanned_pdf_fixture_is_ocrd_locally(self):
         from playwright.sync_api import sync_playwright

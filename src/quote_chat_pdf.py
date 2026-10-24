@@ -20,7 +20,7 @@ class QuoteChatPdfError(RuntimeError):
     """A safe error raised when the server cannot render a PDF."""
 
 
-def _html_document(reply, items, comparison_count, quote_count):
+def _html_document(reply, items, comparison_count, quote_count, price_reference=None):
     rows = list(items or [])
     if not rows:
         rows = [{
@@ -39,6 +39,21 @@ def _html_document(reply, items, comparison_count, quote_count):
         )
         body_rows.append(f"<tr>{cells}</tr>")
     created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    reference_html = ""
+    if price_reference:
+        reference_rows = "".join(
+            "<tr>" + "".join(f"<td>{escape(str(row.get(field) or 'Not stated'))}</td>"
+                              for field, _ in COLUMNS) + "</tr>"
+            for row in price_reference
+        )
+        reference_html = (
+            "<h2>Saved quotation totals — MYR reference</h2>"
+            "<p>Original prices are preserved. Reference conversions exclude bank fees "
+            "and may differ from actual payment rates. These are whole-quotation totals, "
+            "not AI-generated item prices.</p>"
+            f"<table aria-label='MYR price reference'><thead><tr>{headers}</tr></thead>"
+            f"<tbody>{reference_rows}</tbody></table>"
+        )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -76,12 +91,13 @@ def _html_document(reply, items, comparison_count, quote_count):
     <thead><tr>{headers}</tr></thead>
     <tbody>{"".join(body_rows)}</tbody>
   </table>
+  {reference_html}
   <p class="footnote">Internal staff reference. Confirm source quotation details before making a purchase decision.</p>
 </body>
 </html>"""
 
 
-def build_quote_chat_pdf(reply, items, comparison_count, quote_count):
+def build_quote_chat_pdf(reply, items, comparison_count, quote_count, price_reference=None):
     """Render a response summary and the requested four-column quote table."""
     chromium = shutil.which("chromium")
     if not chromium:
@@ -92,7 +108,7 @@ def build_quote_chat_pdf(reply, items, comparison_count, quote_count):
         html_path = temp / "report.html"
         pdf_path = temp / "report.pdf"
         html_path.write_text(
-            _html_document(reply, items, comparison_count, quote_count),
+            _html_document(reply, items, comparison_count, quote_count, price_reference),
             encoding="utf-8",
         )
         environment = {

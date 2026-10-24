@@ -8,9 +8,18 @@ choice, and send text replies from the business number.
 
 In the staff inbox, choose **Compare quotations**, select up to eight incoming
 messages or saved attachments, and set the priority to price, delivery time, or
-both equally. Only those selected sources are sent to RunPod. Results are saved
+both equally. Choose **Review selected** to extract text locally without calling
+RunPod. Check the text and explicitly tick the sources you approve, then choose
+**Send confirmed to AI**. Failed extractions cannot be confirmed. Reviews expire
+after ten minutes and are bound to your staff session; changing the source
+selection requires another review. Images and voice attachments are sent unchanged
+and can be opened separately before confirmation; this step does not transcribe them.
+Only confirmed sources are sent to RunPod. Results are saved
 for staff to review, but the app never accepts a quotation or sends a reply
 automatically. Clearing source message history also removes its saved comparison.
+Local preview has a two-minute combined extraction budget. The app verifies that
+source content still matches the review before sending it to AI. Original files
+are never rewritten by review or comparison.
 
 Set `RUNPOD_API_KEY` in Replit Secrets. The app discovers the served model from
 the configured endpoint's OpenAI-compatible `/v1/models` route; the endpoint
@@ -72,6 +81,7 @@ Explain how your project uses AI to solve the problem and what makes it valuable
 - **Shared WhatsApp inbox** — Receive messages and attachments; staff can reply using the business number.
 - **Price comparison** — Compare selected quotations using price, delivery time, or both. A running comparison can be stopped so you can change the selected sources or priority. Results arriving after cancellation are discarded; the current OpenAI-compatible RunPod endpoint may continue processing remotely until it finishes or times out.
 - **Quotation register** — Review saved analysis details and export the records as an Excel workbook.
+- **MYR price comparisons** — Price and balanced rankings use Malaysian Ringgit. Foreign quotes show their original amount, MYR equivalent, rate, date, and source in comparison views and the register; Excel includes separate original/MYR columns. Frankfurter's public daily reference rates are cached for an hour (no API key and no quote contents shared). Missing, unsupported, or more-than-seven-day-old rates are flagged and block overall price recommendations rather than comparing unlike currencies. Saved conversion snapshots stay fixed for auditability; existing comparisons are upgraded when opened, with original files and team selections preserved. Reference amounts exclude bank fees and may differ from payment rates. Mixed-currency chat PDFs also include a factual four-column MYR totals reference.
 - **Quote AI Chat** — Ask questions using all saved completed comparisons and download each answer as a PDF with company, item, price, and requirement columns. Chat responses are not sent to customers.
 
 ### Tech Stack

@@ -1,4 +1,5 @@
 import io
+import json
 import tempfile
 import time
 import unittest
@@ -98,6 +99,38 @@ class QuotationRegisterTests(unittest.TestCase):
         self.store.update_quote_evaluation(evaluation["id"], "completed", result=result)
         self.store.select_quote(evaluation["id"], message_id)
         return evaluation["id"], message_id
+
+    def test_saved_foreign_quotes_upgrade_once_without_changing_team_choice(self):
+        evaluation_id, message_id = self.add_completed_quote()
+        previous = self.store.quote_evaluation(evaluation_id)
+        result = previous["result"]
+        result["quotes"][0].update(currency="USD", total_price=100)
+        with self.store.db() as db:
+            db.execute("UPDATE quote_evaluations SET result_json=? WHERE id=?",
+                       (json.dumps(result), evaluation_id))
+        calls = []
+        def rate_provider():
+            calls.append(True)
+            return {"USD": {"rate": "4.5", "date": "2026-10-23", "source": "Fixture rates"}}
+        self.app.config["MYR_RATE_PROVIDER"] = rate_provider
+        self.assertEqual(self.client.get("/api/quotation-register").status_code, 401)
+        self.assertFalse(calls)
+        self.login()
+        response = self.client.get(f"/api/quote-evaluations/{evaluation_id}")
+        self.assertEqual(response.status_code, 200)
+        evaluation = response.json["evaluation"]
+        self.assertEqual(evaluation["selected_message_id"], message_id)
+        self.assertEqual(evaluation["updated_at"], previous["updated_at"])
+        quote = evaluation["result"]["quotes"][0]
+        self.assertEqual(quote["total_price"], 100)
+        self.assertEqual(quote["myr_total_price"], 450)
+        register = self.client.get("/api/quotation-register").json["rows"][0]
+        self.assertEqual(register["currency"], "USD")
+        self.assertEqual(register["exchange_rate_date"], "2026-10-23")
+        self.assertEqual(register["myr_total_price"], 450)
+        self.assertEqual(self.client.get("/api/quote-evaluations").status_code, 200)
+        self.assertEqual(self.client.get("/api/quotation-register.xlsx").status_code, 200)
+        self.assertEqual(len(calls), 1, "Saved reference snapshots must not silently revalue")
 
     def test_register_and_excel_export_are_staff_only(self):
         self.assertEqual(self.client.get("/api/quotation-register").status_code, 401)

@@ -72,6 +72,11 @@ never advance the live inbound timestamp or activate a reply window.
   bounded by 90 seconds. Selected legacy XLS files are converted from a temporary
   copy with `ssconvert`; original WhatsApp attachments are never rewritten.
   `tesseract` and `gnumeric` are declared in `.replit`.
+- Quotation previews require staff authentication and CSRF. Preview performs only
+  local extraction (two-minute batch budget, two concurrent previews per process).
+  Comparison requests require a session-bound, signed review token valid for ten
+  minutes. Only confirmed successful sources can be queued, and source digests are
+  checked again before sending content to RunPod. Preview text is not saved.
 - Other types retain raw message content (contacts, location, reactions,
   interactive replies, orders, system/future types). Raw payloads are staff-only.
 - Quote AI Chat sends saved completed comparison facts to the configured RunPod model on each request. It omits phone numbers, message IDs, raw attachment files, and unsaved inbox content. Each answer generates a four-column PDF in the response; PDFs and temporary chat transcripts are not stored in inbox history.

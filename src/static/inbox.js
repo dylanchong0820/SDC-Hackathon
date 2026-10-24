@@ -75,7 +75,7 @@
     if (options.body !== undefined && !isMultipart) headers.set("Content-Type", "application/json");
     if (options.method && options.method !== "GET" && state.csrf) headers.set("X-CSRF-Token", state.csrf);
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 15000);
+    const timeout = window.setTimeout(() => controller.abort(), path === "/api/quote-previews" ? 135000 : 15000);
     try {
       const response = await fetch(path, {
         ...options, headers, credentials: "include", signal: controller.signal,
@@ -156,14 +156,20 @@
       return url.href;
     } catch (_) { return ""; }
   }
-  function brand() {
+  function brand(onClick) {
     const mark = node("span", "brand-mark");
     mark.appendChild(icon("chat"));
     const name = node("span", "brand-name");
     name.appendChild(document.createTextNode("Quote Bot "));
     const accent = node("span", "", "AI");
     name.appendChild(accent);
-    const wrapper = node("div", "brand");
+    const wrapper = node(onClick ? "button" : "div", "brand");
+    if (onClick) {
+      wrapper.type = "button";
+      wrapper.setAttribute("aria-label", "Quote Bot AI: workspace home");
+      wrapper.title = "Go to workspace home";
+      wrapper.addEventListener("click", onClick);
+    }
     wrapper.append(mark, name);
     return wrapper;
   }
@@ -265,8 +271,11 @@
   function renderTopbar() {
     refs.lastEvent = null;
     const top = node("header", "topbar");
-    top.appendChild(brand());
-    const right = node("div", "topbar-right");
+    top.appendChild(brand(() => setMode("home")));
+    const status = node("div", "topbar-status");
+    const right = node("nav", "topbar-right");
+    right.setAttribute("aria-label", "Workspace tools");
+    refs.navigation = right;
     const connection = node("div", `connection${state.pollError ? " offline" : ""}`);
     const connectionLabel = state.pollError ? "Updating paused" : "Connected";
     connection.setAttribute("aria-label", connectionLabel);
@@ -276,25 +285,28 @@
     connection.append(dot, label);
     if (state.status && state.status.last_event_at) {
       refs.lastEvent = node("span", "top-label", `Last webhook ${shortTime(state.status.last_event_at)}`);
-      right.appendChild(refs.lastEvent);
+      status.appendChild(refs.lastEvent);
     }
-    right.append(connection);
-    right.appendChild(button("Workspace home", "icon-button", "home", () => setMode("home")));
-    const quotes = button("Compare quotations", "icon-button quote-button", "list",
-      () => setMode("quotes"));
-    quotes.title = "Compare client quotations";
-    right.appendChild(quotes);
-    right.appendChild(button("Quotation register", "icon-button", "download",
-      () => setMode("register")));
-    right.appendChild(button("Quote AI chat", "icon-button", "assistant",
-      () => setMode("chat")));
-    right.appendChild(button("Configuration checklist", "icon-button", "list", () => setMode("checklist")));
-    right.appendChild(button("Settings", "icon-button", "settings", () => setMode("settings")));
+    status.append(connection);
+    [
+      ["home", "Workspace home", "Home", "home", "Open the workspace home screen"],
+      ["quotes", "Compare quotations", "Compare quotes", "list", "Compare quotations by price and delivery time"],
+      ["register", "Quotation register", "Quote register", "download", "View saved quotations and download an Excel list"],
+      ["chat", "Quote AI chat", "AI chat", "assistant", "Ask about saved comparisons and download answers as PDF"],
+      ["checklist", "Configuration checklist", "Setup checklist", "list", "Check WhatsApp and AI configuration"],
+      ["settings", "Settings", "Settings", "settings", "Manage business numbers, import history, and clear saved messages"]
+    ].forEach(([mode, accessibleLabel, label, glyph, description]) => {
+      const item = button(accessibleLabel, "icon-button", glyph, () => setMode(mode));
+      item.appendChild(node("span", "nav-label", label));
+      item.title = description;
+      item.dataset.mode = mode;
+      right.appendChild(item);
+    });
     const logout = node("button", "quiet-button", "Sign out");
     logout.type = "button";
     logout.addEventListener("click", logoutStaff);
     right.appendChild(logout);
-    top.appendChild(right);
+    top.append(status, right);
     return top;
   }
   function makeWorkspace() {
@@ -1084,6 +1096,12 @@
       window.QuoteChat.unmount();
     }
     state.mode = mode;
+    if (refs.navigation) {
+      refs.navigation.querySelectorAll("[data-mode]").forEach((item) => {
+        if (item.dataset.mode === mode) item.setAttribute("aria-current", "page");
+        else item.removeAttribute("aria-current");
+      });
+    }
     if (!refs.main) return;
     refs.workspace.classList.toggle("page-mode", mode !== "inbox");
     refs.workspace.classList.toggle("home-mode", mode === "home");
