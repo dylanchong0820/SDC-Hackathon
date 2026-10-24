@@ -38,6 +38,7 @@
       submitting: false,
       error: "",
       pollTimer: null,
+      cancellingId: null,
       destroyed: false
     };
 
@@ -224,6 +225,22 @@
         resultHead.appendChild(sectionHeading("03", "Comparison", statusLabel));
         if (evaluation.status === "queued" || evaluation.status === "processing") {
           resultHead.appendChild(el("p", "qe-progress-note", "Analysis is running. This view will update automatically."));
+          const cancelNote = el(
+            "p", "qe-cancel-note",
+            "Stop to change your sources or priority. The app will discard late results; RunPod may continue the in-flight request remotely."
+          );
+          const cancelButton = button(
+            state.cancellingId === String(evaluation.id) ? "Stopping…" : "Stop comparison",
+            "qe-cancel-button",
+            () => cancelEvaluation(evaluation.id)
+          );
+          cancelButton.disabled = state.cancellingId === String(evaluation.id);
+          resultHead.append(cancelNote, cancelButton);
+        } else if (evaluation.status === "cancelled") {
+          resultHead.appendChild(el(
+            "p", "qe-cancelled-note",
+            "Comparison stopped. You can change the selected sources or priority and start another comparison."
+          ));
         } else if (evaluation.status === "failed") {
           resultHead.appendChild(el("p", "qe-inline-error", evaluation.error || "Analysis could not be completed."));
         }
@@ -360,7 +377,13 @@
     }
 
     function statusText(status) {
-      return ({ queued: "Queued", processing: "Processing", completed: "Analysis complete", failed: "Analysis failed" })[status] || "Status unavailable";
+      return ({
+        queued: "Queued",
+        processing: "Processing",
+        completed: "Analysis complete",
+        failed: "Analysis failed",
+        cancelled: "Stopped"
+      })[status] || "Status unavailable";
     }
     function isActive(evaluation) {
       return evaluation.status === "queued" || evaluation.status === "processing";
@@ -461,6 +484,33 @@
         state.pollTimer = window.setTimeout(() => pollEvaluation(id), 3500);
       }
       render();
+    }
+
+    async function cancelEvaluation(id) {
+      if (state.cancellingId || state.destroyed) return;
+      clearPoll();
+      state.error = "";
+      state.cancellingId = String(id);
+      render();
+      try {
+        const response = await request(
+          `/api/quote-evaluations/${encodeURIComponent(id)}/cancel`,
+          { method: "POST", body: {} }
+        );
+        if (response && response.evaluation) {
+          state.evaluation = response.evaluation;
+          rememberEvaluation(state.evaluation);
+          toast("Comparison stopped. You can change the sources and try again.");
+        }
+      } catch (error) {
+        state.error = error && error.message ? error.message : "Could not stop the comparison.";
+        if (state.evaluation && isActive(state.evaluation)) {
+          state.pollTimer = window.setTimeout(() => pollEvaluation(id), 1800);
+        }
+      } finally {
+        state.cancellingId = null;
+        render();
+      }
     }
 
     async function loadEvaluation(id) {

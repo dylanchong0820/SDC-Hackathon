@@ -316,19 +316,33 @@ class Store:
         return {"evaluation": dict(evaluation), "messages": [dict(row) for row in rows]}
 
     def update_quote_evaluation(self, evaluation_id, status, result=None, error=None):
-        if status not in {"queued", "processing", "completed", "failed"}:
+        if status not in {"queued", "processing", "completed", "failed", "cancelled"}:
             raise ValueError("Invalid quote evaluation status.")
         with self.db() as db:
             if result is None:
                 db.execute("""
-                    UPDATE quote_evaluations SET status=?,error=?,updated_at=? WHERE id=?
+                    UPDATE quote_evaluations SET status=?,error=?,updated_at=?
+                    WHERE id=? AND status IN ('queued','processing')
                 """, (status, str(error or "")[:1200], int(time.time()), evaluation_id))
             else:
                 db.execute("""
                     UPDATE quote_evaluations
                     SET status=?,result_json=?,error=?,updated_at=? WHERE id=?
+                    AND status IN ('queued','processing')
                 """, (status, json.dumps(result, ensure_ascii=False),
                       str(error or "")[:1200], int(time.time()), evaluation_id))
+            exists = db.execute(
+                "SELECT 1 FROM quote_evaluations WHERE id=?", (evaluation_id,)).fetchone()
+        return self.quote_evaluation(evaluation_id) if exists else None
+
+    def cancel_quote_evaluation(self, evaluation_id):
+        """Cancel an active comparison without allowing late worker results to replace it."""
+        with self.db() as db:
+            db.execute("""
+                UPDATE quote_evaluations
+                SET status='cancelled',error='Stopped by staff.',updated_at=?
+                WHERE id=? AND status IN ('queued','processing')
+            """, (int(time.time()), evaluation_id))
             exists = db.execute(
                 "SELECT 1 FROM quote_evaluations WHERE id=?", (evaluation_id,)).fetchone()
         return self.quote_evaluation(evaluation_id) if exists else None

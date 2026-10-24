@@ -1,5 +1,6 @@
 """Quote comparison uses isolated messages and never calls a live provider."""
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -143,6 +144,76 @@ class QuoteAnalysisTests(unittest.TestCase):
 
         self.store.clear_history(self.conversation["id"], delete_attachments=False)
         self.assertIsNone(self.store.quote_evaluation(evaluation["id"]))
+
+    def test_comparison_can_be_cancelled_and_late_results_are_ignored(self):
+        self.add_message("quote-cancel", "MYR 125, delivery in 4 days.")
+        evaluation = self.store.create_quote_evaluation(["quote-cancel"], "balanced")
+        self.assertEqual(
+            self.client.post(
+                f"/api/quote-evaluations/{evaluation['id']}/cancel",
+                json={}, headers={"X-CSRF-Token": self.csrf}).status_code,
+            401,
+        )
+        self.login()
+        self.assertEqual(
+            self.client.post(
+                f"/api/quote-evaluations/{evaluation['id']}/cancel",
+                json={}).status_code,
+            403,
+        )
+
+        stopped = self.post(
+            f"/api/quote-evaluations/{evaluation['id']}/cancel", {})
+        self.assertEqual(stopped.status_code, 200)
+        self.assertEqual(stopped.json["evaluation"]["status"], "cancelled")
+
+        late_result = {"quotes": [{"message_id": "quote-cancel", "total_price": 125}]}
+        unchanged = self.store.update_quote_evaluation(
+            evaluation["id"], "completed", result=late_result)
+        self.assertEqual(unchanged["status"], "cancelled")
+        self.assertEqual(unchanged["result"], {})
+
+        completed = self.store.create_quote_evaluation(["quote-cancel"], "price")
+        self.store.update_quote_evaluation(completed["id"], "completed", result={})
+        rejected = self.post(
+            f"/api/quote-evaluations/{completed['id']}/cancel", {})
+        self.assertEqual(rejected.status_code, 409)
+        self.assertEqual(rejected.json["evaluation"]["status"], "completed")
+
+    def test_cancel_during_runpod_request_discards_response(self):
+        self.login()
+        self.add_message("quote-running", "MYR 125, delivery in 4 days.")
+        evaluation = self.store.create_quote_evaluation(["quote-running"], "balanced")
+        worker = QuoteAnalysisWorker(
+            self.store, "https://example.api.runpod.ai", "fake-test-only-key")
+        self.app.extensions["quote_worker"] = worker
+        request_started = threading.Event()
+        finish_request = threading.Event()
+
+        def delayed_response(*_):
+            request_started.set()
+            finish_request.wait(3)
+            return {"quotes": [{
+                "quote_key": "QUOTE_1", "vendor": "Late vendor", "currency": "MYR",
+                "total_price": 125, "delivery_days": 4,
+                "delivery_unit": "calendar_days",
+            }]}
+
+        try:
+            with patch.object(worker, "_request_model", side_effect=delayed_response):
+                worker.submit(evaluation["id"])
+                self.assertTrue(request_started.wait(3))
+                stopped = self.post(
+                    f"/api/quote-evaluations/{evaluation['id']}/cancel", {})
+                self.assertEqual(stopped.status_code, 200)
+                self.assertEqual(stopped.json["evaluation"]["status"], "cancelled")
+                finish_request.set()
+                worker.jobs.join()
+            current = self.store.quote_evaluation(evaluation["id"])
+            self.assertEqual(current["status"], "cancelled")
+            self.assertEqual(current["result"], {})
+        finally:
+            finish_request.set()
 
     def test_local_readers_and_multimodal_payloads_do_not_call_runpod(self):
         root = Path(self.directory.name)

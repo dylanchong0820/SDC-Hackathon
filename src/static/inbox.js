@@ -268,8 +268,11 @@
     top.appendChild(brand());
     const right = node("div", "topbar-right");
     const connection = node("div", `connection${state.pollError ? " offline" : ""}`);
+    const connectionLabel = state.pollError ? "Updating paused" : "Connected";
+    connection.setAttribute("aria-label", connectionLabel);
+    connection.title = connectionLabel;
     const dot = node("span", "connection-dot");
-    const label = node("span", "", state.pollError ? "Updating paused" : "Connected");
+    const label = node("span", "", connectionLabel);
     connection.append(dot, label);
     if (state.status && state.status.last_event_at) {
       refs.lastEvent = node("span", "top-label", `Last webhook ${shortTime(state.status.last_event_at)}`);
@@ -1022,6 +1025,7 @@
       connection.classList.toggle("offline", Boolean(state.pollError));
       const label = connection.querySelector("span:last-child");
       if (label) label.textContent = state.pollError ? "Update problem" : "Connected";
+      connection.setAttribute("aria-label", state.pollError ? "Update problem" : "Connected");
       connection.title = state.pollError || "Workspace updates are running.";
     }
     if (refs.pollNotice) {
@@ -1081,6 +1085,7 @@
     }
     state.mode = mode;
     if (!refs.main) return;
+    refs.workspace.classList.toggle("page-mode", mode !== "inbox");
     refs.workspace.classList.toggle("home-mode", mode === "home");
     if (mode !== "inbox") refs.workspace.classList.add("chat-open");
     if (mode === "inbox") renderInbox();

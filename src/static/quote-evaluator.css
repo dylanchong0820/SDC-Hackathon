@@ -91,6 +91,10 @@
 .qe-results { margin:0 27px 27px; }
 .qe-results-head { display:flex; flex-direction:column; gap:8px; }
 .qe-progress-note { margin:0 0 0 37px; color:hsl(var(--qe-muted)); font-size:11px; }
+.qe-cancel-note, .qe-cancelled-note { margin:0 0 0 37px; color:hsl(var(--qe-muted)); font-size:10px; line-height:1.55; }
+.qe-cancel-button { min-height:34px; align-self:flex-start; margin-left:37px; padding:0 11px; border:1px solid hsl(7 55% 53% / .42); border-radius:8px; background:hsl(7 78% 96%); color:hsl(7 56% 37%); font-size:10px; font-weight:700; cursor:pointer; }
+.qe-cancel-button:hover:not(:disabled) { background:hsl(7 78% 92%); }
+.qe-cancel-button:disabled { opacity:.6; cursor:wait; }
 .qe-summary { max-width:900px; margin:16px 0 12px; color:hsl(var(--qe-ink)); font-size:13px; line-height:1.6; }
 .qe-limitations { margin:13px 0; padding:12px 14px; border-radius:10px; background:hsl(var(--qe-paper)); color:hsl(var(--qe-muted)); font-size:11px; }
 .qe-limitations strong { color:hsl(var(--qe-ink)); }

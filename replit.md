@@ -9,6 +9,8 @@ the staff website. Keep the Python stack and the original local archive.
 - Listen on `0.0.0.0:5000`; website `/`, webhook `/webhook`, health `/health`.
 - Runtime dependencies: `requirements.txt`. Optional browser-test tooling:
   `requirements-dev.txt`.
+- Quote AI PDF downloads use headless Chromium from `PATH`; generated files are
+  temporary and are not written to `whatsapp_data/`.
 - Tests: `python -m unittest discover -s tests -v`.
 - Browser smoke test: `python tests/browser_smoke.py` (Playwright and a Chromium
   browser are required; see `CHROMIUM_PATH` in that script).
@@ -69,6 +71,7 @@ never advance the live inbound timestamp or activate a reply window.
 - Other types retain raw message content (contacts, location, reactions,
   interactive replies, orders, system/future types). Raw payloads are staff-only.
 - Quote AI Chat sends saved completed comparison facts to the configured RunPod model on each request. It omits phone numbers, message IDs, raw attachment files, and unsaved inbox content. Each answer generates a four-column PDF in the response; PDFs and temporary chat transcripts are not stored in inbox history.
+- Staff can stop queued or running comparisons. Cancellation prevents an in-flight result from being saved; the configured OpenAI-compatible RunPod endpoint does not expose a job ID or remote cancellation route, so RunPod may continue that request until it finishes or times out.
 - Text sends: at most 4096 characters, only within the 24-hour customer-service
   window since an inbound customer message. Starting an empty conversation does
   not send anything or open that window. Approved-template sends are not part of

@@ -396,7 +396,7 @@ def rank_quotes(quotes, priority):
 
 
 class QuoteAnalysisWorker:
-    """A single background worker for RunPod requests; source data stays off logs."""
+    """Bounded background workers for RunPod requests; source data stays off logs."""
 
     def __init__(self, store, endpoint_url, api_key, model_timeout=180, request_timeout=240):
         self.store = store
@@ -410,7 +410,8 @@ class QuoteAnalysisWorker:
         self.model_timeout = model_timeout
         self.request_timeout = request_timeout
         self.jobs = queue.Queue()
-        self.thread = None
+        self.threads = []
+        self.cancel_events = {}
         self.lock = threading.Lock()
         self.model_id = None
 
@@ -426,11 +427,30 @@ class QuoteAnalysisWorker:
 
     def submit(self, evaluation_id):
         with self.lock:
-            if self.thread is None or not self.thread.is_alive():
-                self.thread = threading.Thread(target=self._serve, daemon=True,
-                                               name="quote-analysis-worker")
-                self.thread.start()
+            self.cancel_events[evaluation_id] = threading.Event()
+            self.threads = [thread for thread in self.threads if thread.is_alive()]
+            while len(self.threads) < 2:
+                thread = threading.Thread(
+                    target=self._serve, daemon=True,
+                    name=f"quote-analysis-worker-{len(self.threads) + 1}")
+                self.threads.append(thread)
+                thread.start()
             self.jobs.put(evaluation_id)
+
+    def signal_cancel(self, evaluation_id):
+        """Stop local preparation and discard any result returned after cancellation."""
+        with self.lock:
+            event = self.cancel_events.get(evaluation_id)
+        if event:
+            event.set()
+
+    def _is_cancelled(self, evaluation_id):
+        with self.lock:
+            event = self.cancel_events.get(evaluation_id)
+        if event and event.is_set():
+            return True
+        evaluation = self.store.quote_evaluation(evaluation_id)
+        return not evaluation or evaluation["status"] not in {"queued", "processing"}
 
     def _serve(self):
         while True:
@@ -446,6 +466,8 @@ class QuoteAnalysisWorker:
                     evaluation_id, "failed",
                     error="Quote analysis failed unexpectedly. The original messages and files are unchanged.")
             finally:
+                with self.lock:
+                    self.cancel_events.pop(evaluation_id, None)
                 self.jobs.task_done()
 
     def _get_model_id(self):
@@ -546,8 +568,10 @@ class QuoteAnalysisWorker:
         parts.insert(0, {"type": "text", "text": "\n".join(prompt_text)})
         return candidate, parts, media_total
 
-    def _request_model(self, user_content):
+    def _request_model(self, user_content, evaluation_id=None):
         model_id = self._get_model_id()
+        if evaluation_id is not None and self._is_cancelled(evaluation_id):
+            return None
         if not self.api_key:
             raise QuoteAnalysisError("RUNPOD_API_KEY is not configured in Replit Secrets.")
         payload = {
@@ -655,9 +679,11 @@ class QuoteAnalysisWorker:
 
     def _analyze(self, evaluation_id):
         current = self.store.quote_evaluation_inputs(evaluation_id)
-        if not current:
+        if not current or self._is_cancelled(evaluation_id):
             return
-        self.store.update_quote_evaluation(evaluation_id, "processing")
+        updated = self.store.update_quote_evaluation(evaluation_id, "processing")
+        if not updated or updated["status"] != "processing":
+            return
         if not self.api_key:
             raise QuoteAnalysisError("RUNPOD_API_KEY is not configured in Replit Secrets.")
 
@@ -675,6 +701,8 @@ class QuoteAnalysisWorker:
         total_text = 0
         prepared = []
         for index, row in enumerate(current["messages"], start=1):
+            if self._is_cancelled(evaluation_id):
+                return
             quote_key = f"QUOTE_{index}"
             try:
                 candidate, parts, media_total = self._prepare_message(row, quote_key, media_total)
@@ -701,9 +729,13 @@ class QuoteAnalysisWorker:
 
         # Avoid sending content if a staff member deleted one of the selected
         # messages while this job was extracting local documents.
-        if not self.store.quote_evaluation_inputs(evaluation_id):
+        if self._is_cancelled(evaluation_id):
             return
-        model_response = self._request_model(user_content)
+        model_response = self._request_model(user_content, evaluation_id)
+        if self._is_cancelled(evaluation_id):
+            return
+        if not isinstance(model_response, dict):
+            raise QuoteAnalysisError("RunPod returned an unexpected analysis response.")
         returned = {
             str(item.get("quote_key")): item
             for item in model_response["quotes"] if isinstance(item, dict)

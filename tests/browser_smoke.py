@@ -6,6 +6,7 @@ requirements-dev.txt. Set CHROMIUM_PATH if Chromium isn't at the Replit path.
 import base64
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import threading
@@ -19,11 +20,7 @@ from werkzeug.serving import make_server
 from src.server import create_app
 from src.whatsapp import process_event
 
-CHROMIUM_PATH = os.getenv(
-    "CHROMIUM_PATH",
-    "/nix/store/71577rskzyhch3axhdqx7faygc2xyn4v-playwright-browsers-1.55.0-with-cjk/"
-    "chromium-1187/chrome-linux/chrome",
-)
+CHROMIUM_PATH = os.getenv("CHROMIUM_PATH") or shutil.which("chromium")
 
 
 class FakeGraph:
@@ -73,6 +70,8 @@ def run():
         document.parent.mkdir(exist_ok=True)
         document.write_bytes(b"%PDF-1.4\n% isolated download test\n%%EOF")
         store.media_saved(store.message("wamid.browser-document"), document, "application/pdf", "test-document.pdf")
+        active_comparison = store.create_quote_evaluation(["wamid.browser-text"], "balanced")
+        store.update_quote_evaluation(active_comparison["id"], "processing")
         server = make_server("127.0.0.1", 0, app, threaded=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -87,6 +86,7 @@ def run():
                 page.goto(url)
                 page.get_by_label("Staff password").fill("isolated-browser-test-password")
                 page.get_by_role("button", name="Sign in", exact=True).click()
+                page.get_by_role("button", name="Inbox. Customer conversations", exact=True).click()
                 page.get_by_text("Browser Test Contact", exact=True).first.wait_for()
                 # Empty selection or initial auto-selection are both valid designs.
                 if not page.get_by_label("Message", exact=True).is_visible():
@@ -143,6 +143,52 @@ def run():
                 page.get_by_role("button", name="Save default", exact=True).click()
                 page.screenshot(path=str(outputs / "mobile.png"), full_page=True, animations="disabled")
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), "Mobile page overflows"
+                # Every staff tool must remain reachable in narrow, short windows.
+                for viewport in ({"width": 390, "height": 420}, {"width": 320, "height": 360},
+                                 {"width": 1024, "height": 450}):
+                    page.set_viewport_size(viewport)
+                    for navigation, selector in (
+                        ("Workspace home", ".wh-root"),
+                        ("Compare quotations", ".qe-root"),
+                        ("Quotation register", ".qr-root"),
+                        ("Quote AI chat", ".qc-root"),
+                        ("Configuration checklist", ".settings-view"),
+                        ("Settings", ".settings-view"),
+                    ):
+                        page.get_by_role("button", name=navigation, exact=True).click()
+                        page.locator(selector).wait_for()
+                        if navigation == "Compare quotations" and viewport["width"] == 390:
+                            page.get_by_role("button", name="Stop comparison", exact=True).click()
+                            expect(page.get_by_text(
+                                "Comparison stopped. You can change the selected sources or priority and start another comparison."
+                            )).to_be_visible()
+                        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), (
+                            f"{navigation} overflows at {viewport}"
+                        )
+                        page.evaluate("window.scrollTo(0, document.scrollingElement.scrollHeight)")
+                        assert page.evaluate(
+                            "scrollY + innerHeight >= document.scrollingElement.scrollHeight - 2"
+                        ), f"{navigation} cannot scroll to the bottom at {viewport}"
+                        page.evaluate("window.scrollTo(0, 0)")
+                    page.get_by_role("button", name="Workspace home", exact=True).click()
+                    page.get_by_role("button", name="Inbox. Customer conversations", exact=True).click()
+                    if viewport["width"] <= 640 and page.get_by_label("Message", exact=True).is_visible():
+                        page.get_by_role("button", name="Back to conversations", exact=True).click()
+                    page.get_by_role("button", name="New conversation", exact=True).click()
+                    expect(page.locator(".settings-view")).to_be_visible()
+                    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), (
+                        f"New conversation overflows at {viewport}"
+                    )
+                    page.get_by_role("button", name="Workspace home", exact=True).click()
+                    page.get_by_role("button", name="Inbox. Customer conversations", exact=True).click()
+                    if not page.get_by_label("Message", exact=True).is_visible():
+                        page.get_by_text("Browser Test Contact", exact=True).first.click()
+                    expect(page.get_by_label("Message", exact=True)).to_be_visible()
+                    assert page.locator(".message-scroll").evaluate(
+                        "el => getComputedStyle(el).overflowY === 'auto' && el.clientHeight > 0"
+                    ), f"Inbox messages have no scroll area at {viewport}"
+                page.set_viewport_size({"width": 390, "height": 844})
+                page.get_by_role("button", name="Settings", exact=True).click()
                 # A second employee must drop cached messages when another clears history.
                 colleague_context = browser.new_context(viewport={"width": 1280, "height": 800})
                 colleague = colleague_context.new_page()
@@ -150,6 +196,7 @@ def run():
                 colleague.goto(url)
                 colleague.get_by_label("Staff password", exact=True).fill("isolated-browser-test-password")
                 colleague.get_by_role("button", name="Sign in", exact=True).click()
+                colleague.get_by_role("button", name="Inbox. Customer conversations", exact=True).click()
                 colleague.get_by_text("Browser Test Contact", exact=True).first.click()
                 expect(colleague.get_by_text("Can you review the attached documents?", exact=True)).to_be_visible()
 
@@ -190,7 +237,7 @@ def run():
                 browser.close()
         finally:
             server.shutdown()
-        print("Browser smoke passed: login, media, fake-Meta sends, drafts, settings, chat/all deletion, attachment choices, colleague cache refresh, responsive dialogs.")
+        print("Browser smoke passed: login, media, fake-Meta sends, drafts, all staff screens in narrow/short windows, chat/all deletion, attachment choices, colleague cache refresh, responsive dialogs.")
         print("Screenshots in generated-artifacts/browser-check (isolated fixture data only).")
 
 

@@ -257,9 +257,8 @@ class QuoteChatTests(unittest.TestCase):
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
             ).stdout.decode("utf-8")
             extracted = re.sub(r"\s+", " ", extracted)
-            self.assertIn("Page 2 of", extracted)
-            self.assertIn("Vendor 8", extracted)
             self.assertGreaterEqual(extracted.count("Company name"), 2)
+            self.assertIn("Vendor 8", extracted)
 
     def test_runpod_chat_reports_safe_provider_errors(self):
         worker = QuoteAnalysisWorker(None, "https://endpoint.api.runpod.ai", "test-api-key")

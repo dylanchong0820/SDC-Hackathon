@@ -15,7 +15,7 @@
   color: hsl(var(--qc-ink));
   background: hsl(var(--qc-paper));
   font-family: 'DM Sans', sans-serif;
-  overflow: hidden;
+  overflow-x: clip;
 }
 .qc-root *, .qc-root *::before, .qc-root *::after { box-sizing: border-box; }
 .qc-root button, .qc-root textarea { font: inherit; }

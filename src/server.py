@@ -26,7 +26,7 @@ if __package__:
         QuoteChatContextTooLarge, QuoteChatInputError, QuoteChatOutputError,
         parse_model_output, prepare_model_messages,
     )
-    from .quote_chat_pdf import build_quote_chat_pdf
+    from .quote_chat_pdf import QuoteChatPdfError, build_quote_chat_pdf
     from .storage import Store, StorageBusyError
     from .whatsapp import GraphClient, GraphError, MediaWorker, process_event
 else:
@@ -37,7 +37,7 @@ else:
         QuoteChatContextTooLarge, QuoteChatInputError, QuoteChatOutputError,
         parse_model_output, prepare_model_messages,
     )
-    from quote_chat_pdf import build_quote_chat_pdf
+    from quote_chat_pdf import QuoteChatPdfError, build_quote_chat_pdf
     from storage import Store, StorageBusyError
     from whatsapp import GraphClient, GraphError, MediaWorker, process_event
 
@@ -383,7 +383,10 @@ def create_app(config=None):
             reply, items = parse_model_output(model_output)
         except QuoteChatOutputError as error:
             return jsonify(error=str(error)), 502
-        pdf = build_quote_chat_pdf(reply, items, comparison_count, quote_count)
+        try:
+            pdf = build_quote_chat_pdf(reply, items, comparison_count, quote_count)
+        except QuoteChatPdfError as error:
+            return jsonify(error=str(error)), 503
         return jsonify(
             reply=reply,
             items=items,
@@ -441,6 +444,20 @@ def create_app(config=None):
         evaluation = store.quote_evaluation(evaluation_id)
         if not evaluation:
             return jsonify(error="Quote comparison not found. It may have been removed with chat history."), 404
+        return jsonify(evaluation=evaluation)
+
+    @app.post("/api/quote-evaluations/<int:evaluation_id>/cancel")
+    @require_staff
+    def cancel_quote_evaluation(evaluation_id):
+        evaluation = store.cancel_quote_evaluation(evaluation_id)
+        if not evaluation:
+            return jsonify(error="Quote comparison not found. It may have been removed with chat history."), 404
+        if evaluation["status"] != "cancelled":
+            return jsonify(error="This comparison has already finished.", evaluation=evaluation), 409
+        worker = app.extensions["quote_worker"]
+        signal_cancel = getattr(worker, "signal_cancel", None)
+        if callable(signal_cancel):
+            signal_cancel(evaluation_id)
         return jsonify(evaluation=evaluation)
 
     @app.post("/api/quote-evaluations/<int:evaluation_id>/selection")

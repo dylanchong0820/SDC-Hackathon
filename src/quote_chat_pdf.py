@@ -1,215 +1,26 @@
-"""Small dependency-free PDF writer for Quote AI chat responses."""
+"""Generate a temporary, downloadable Quote AI PDF without storing it on disk."""
 from datetime import datetime, timezone
-import unicodedata
+from html import escape
+from pathlib import Path
+import os
+import shutil
+import subprocess
+import tempfile
 
 
-PAGE_WIDTH = 842
-PAGE_HEIGHT = 595
-MARGIN_X = 41
-BOTTOM_LIMIT = 38
-COLUMN_HEADERS = (
-    "Company name",
-    "Item name",
-    "Item price",
-    "Additional requirement",
+COLUMNS = (
+    ("company_name", "Company name"),
+    ("item_name", "Item name"),
+    ("item_price", "Item price"),
+    ("additional_requirement", "Additional requirement"),
 )
-COLUMN_WIDTHS = (150, 170, 100, 340)
-TABLE_WIDTH = sum(COLUMN_WIDTHS)
-TABLE_HEADER_HEIGHT = 25
-FONT_SIZE = 8.5
-LINE_HEIGHT = 10.5
-CELL_PADDING = 6
 
 
-def _safe_text(value):
-    text = unicodedata.normalize("NFC", str(value or ""))
-    text = text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
-    text = text.replace("\r", "\n").replace("\t", " ")
-    return "".join(
-        char if ord(char) <= 0xFFFF and not 0xD800 <= ord(char) <= 0xDFFF else "?"
-        for char in text
-    )
+class QuoteChatPdfError(RuntimeError):
+    """A safe error raised when the server cannot render a PDF."""
 
 
-def _character_width(char):
-    if unicodedata.combining(char):
-        return 0
-    return 1 if unicodedata.east_asian_width(char) in {"F", "W"} else 0.53
-
-
-def _wrap(value, width, font_size=FONT_SIZE):
-    text = _safe_text(value)
-    max_units = max(8, width / font_size)
-    lines = []
-    for paragraph in text.split("\n"):
-        words = paragraph.split()
-        if not words:
-            lines.append("")
-            continue
-        line = ""
-        for word in words:
-            chunks = []
-            chunk = ""
-            chunk_width = 0
-            for char in word:
-                char_width = _character_width(char)
-                if chunk and chunk_width + char_width > max_units:
-                    chunks.append(chunk)
-                    chunk = ""
-                    chunk_width = 0
-                chunk += char
-                chunk_width += char_width
-            if chunk:
-                chunks.append(chunk)
-            for word_part in chunks[:-1]:
-                if line:
-                    lines.append(line)
-                    line = ""
-                lines.append(word_part)
-            word = chunks[-1] if chunks else ""
-            candidate = f"{line} {word}".strip()
-            candidate_width = sum(_character_width(char) for char in candidate)
-            if candidate_width > max_units and line:
-                lines.append(line)
-                line = word
-            else:
-                line = candidate
-        if line:
-            lines.append(line)
-    return lines or [""]
-
-
-def _text(x, y, value, size=FONT_SIZE, bold=False, color=(0.10, 0.16, 0.15)):
-    safe = _safe_text(value)
-    encoded = safe.encode("utf-16-be").hex().upper()
-    font = "F2" if bold else "F1"
-    red, green, blue = color
-    return (
-        f"{red:.3f} {green:.3f} {blue:.3f} rg "
-        f"BT /{font} {size:g} Tf 1 0 0 1 {x:.2f} {y:.2f} Tm <{encoded}> Tj ET\n"
-    )
-
-
-def _rect(x, y, width, height, color):
-    red, green, blue = color
-    return f"{red:.3f} {green:.3f} {blue:.3f} rg {x:.2f} {y:.2f} {width:.2f} {height:.2f} re f\n"
-
-
-def _line(x1, y1, x2, y2, color=(0.80, 0.83, 0.81)):
-    red, green, blue = color
-    return f"{red:.3f} {green:.3f} {blue:.3f} RG 0.55 w {x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S\n"
-
-
-def _start_page(page_number, reply, comparison_count, quote_count):
-    commands = []
-    commands.append(_text(MARGIN_X, 565, "QUOTE BOT AI", 8, True, (0.18, 0.38, 0.34)))
-    if page_number == 0:
-        commands.append(_text(MARGIN_X, 540, "Quotation output", 18, True))
-        created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        commands.append(_text(
-            MARGIN_X, 522,
-            f"Based on {comparison_count} completed comparisons and {quote_count} quotations · {created}",
-            8.5, False, (0.35, 0.42, 0.40)))
-        commands.append(_text(MARGIN_X, 501, "Quote AI response", 9, True))
-        reply_lines = _wrap(reply, TABLE_WIDTH, 8.5)
-        y = 486
-        for line in reply_lines:
-            commands.append(_text(MARGIN_X, y, line, 8.5))
-            y -= 11
-        table_top = y - 8
-    else:
-        commands.append(_text(MARGIN_X, 542, "Quotation output · continued", 14, True))
-        table_top = 518
-    return commands, table_top
-
-
-def _table_header(commands, y):
-    row_bottom = y - TABLE_HEADER_HEIGHT
-    commands.append(_rect(MARGIN_X, row_bottom, TABLE_WIDTH, TABLE_HEADER_HEIGHT, (0.09, 0.27, 0.25)))
-    x = MARGIN_X
-    for header, width in zip(COLUMN_HEADERS, COLUMN_WIDTHS):
-        commands.append(_text(x + CELL_PADDING, y - 16, header, 8, True, (1, 1, 1)))
-        x += width
-    commands.append(_line(MARGIN_X, row_bottom, MARGIN_X + TABLE_WIDTH, row_bottom, (0.09, 0.27, 0.25)))
-    return row_bottom
-
-
-def _table_row(commands, y, row, row_index):
-    cells = [row.get(key, "Not stated") for key in (
-        "company_name", "item_name", "item_price", "additional_requirement")]
-    wrapped = [
-        _wrap(value, width - 2 * CELL_PADDING)
-        for value, width in zip(cells, COLUMN_WIDTHS)
-    ]
-    row_height = max(25, max(len(lines) for lines in wrapped) * LINE_HEIGHT + 2 * CELL_PADDING)
-    row_bottom = y - row_height
-    if row_index % 2:
-        commands.append(_rect(MARGIN_X, row_bottom, TABLE_WIDTH, row_height, (0.96, 0.97, 0.96)))
-    x = MARGIN_X
-    for lines, width in zip(wrapped, COLUMN_WIDTHS):
-        baseline = y - CELL_PADDING - FONT_SIZE
-        for line in lines:
-            commands.append(_text(x + CELL_PADDING, baseline, line, FONT_SIZE))
-            baseline -= LINE_HEIGHT
-        x += width
-    x = MARGIN_X
-    commands.append(_line(MARGIN_X, row_bottom, MARGIN_X + TABLE_WIDTH, row_bottom))
-    for width in COLUMN_WIDTHS[:-1]:
-        x += width
-        commands.append(_line(x, y, x, row_bottom, (0.88, 0.90, 0.88)))
-    return row_bottom
-
-
-def _pdf_document(page_streams):
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        None,
-        b"<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light /Encoding /UniGB-UCS2-H /DescendantFonts [4 0 R] >>",
-        b"<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 4 >> /DW 1000 /W [32 [250] 33 126 500] /FontDescriptor 5 0 R >>",
-        b"<< /Type /FontDescriptor /FontName /STSong-Light /Flags 4 /FontBBox [-25 -254 1000 880] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 700 /StemV 80 >>",
-    ]
-    page_ids = [6 + index * 2 for index in range(len(page_streams))]
-    objects[1] = (
-        f"<< /Type /Pages /Kids [{' '.join(f'{page_id} 0 R' for page_id in page_ids)}] "
-        f"/Count {len(page_streams)} >>"
-    ).encode("ascii")
-    for index, stream in enumerate(page_streams):
-        page_id = page_ids[index]
-        stream_id = page_id + 1
-        objects.append(
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAGE_WIDTH} {PAGE_HEIGHT}] "
-            f"/Resources << /Font << /F1 3 0 R /F2 3 0 R >> >> /Contents {stream_id} 0 R >>"
-            .encode("ascii")
-        )
-        objects.append(
-            f"<< /Length {len(stream)} >>\nstream\n".encode("ascii")
-            + stream
-            + b"\nendstream"
-        )
-    info_id = len(objects) + 1
-    objects.append(b"<< /Title <51756F746520426F74204149202D2051756F746174696F6E204F7574707574> /Producer <51756F746520426F74204149> >>")
-
-    output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
-    offsets = [0]
-    for object_id, body in enumerate(objects, start=1):
-        offsets.append(len(output))
-        output.extend(f"{object_id} 0 obj\n".encode("ascii"))
-        output.extend(body)
-        output.extend(b"\nendobj\n")
-    xref_offset = len(output)
-    output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
-    output.extend(b"0000000000 65535 f \n")
-    for offset in offsets[1:]:
-        output.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
-    output.extend(
-        f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R /Info {info_id} 0 R >>\n"
-        f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii")
-    )
-    return bytes(output)
-
-
-def build_quote_chat_pdf(reply, items, comparison_count, quote_count):
-    """Render a response summary and the requested four-column quote table."""
+def _html_document(reply, items, comparison_count, quote_count):
     rows = list(items or [])
     if not rows:
         rows = [{
@@ -219,28 +30,104 @@ def build_quote_chat_pdf(reply, items, comparison_count, quote_count):
             "additional_requirement": "No item-specific requirement was identified in this answer.",
         }]
 
-    pages = []
-    commands, y = _start_page(0, reply, comparison_count, quote_count)
-    y = _table_header(commands, y)
-    for row_index, row in enumerate(rows):
-        cell_lines = [
-            _wrap(row.get(key, "Not stated"), width - 2 * CELL_PADDING)
-            for key, width in zip(
-                ("company_name", "item_name", "item_price", "additional_requirement"),
-                COLUMN_WIDTHS)
-        ]
-        row_height = max(25, max(len(lines) for lines in cell_lines) * LINE_HEIGHT + 2 * CELL_PADDING)
-        if y - row_height < BOTTOM_LIMIT:
-            pages.append(commands)
-            commands, y = _start_page(len(pages), reply, comparison_count, quote_count)
-            y = _table_header(commands, y)
-        y = _table_row(commands, y, row, row_index)
-    pages.append(commands)
+    headers = "".join(f"<th scope='col'>{escape(label)}</th>" for _, label in COLUMNS)
+    body_rows = []
+    for row in rows:
+        cells = "".join(
+            f"<td>{escape(str(row.get(field) or 'Not stated'))}</td>"
+            for field, _ in COLUMNS
+        )
+        body_rows.append(f"<tr>{cells}</tr>")
+    created = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quote Bot AI — Quotation output</title>
+  <style>
+    @page {{ size: A4 landscape; margin: 13mm 12mm; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; color: #1d2927; font: 10px/1.45 Arial, "Noto Sans", sans-serif; }}
+    .brand {{ margin: 0 0 7px; color: #26734a; font-size: 9px; font-weight: 700; letter-spacing: .15em; }}
+    h1 {{ margin: 0; color: #193e39; font-size: 22px; letter-spacing: -.04em; }}
+    .meta {{ margin: 6px 0 16px; color: #66716f; font-size: 9px; }}
+    .summary-label {{ margin: 0 0 4px; color: #26734a; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }}
+    .summary {{ margin: 0 0 15px; white-space: pre-wrap; overflow-wrap: anywhere; }}
+    table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+    col.company {{ width: 19%; }} col.item {{ width: 22%; }}
+    col.price {{ width: 14%; }} col.requirement {{ width: 45%; }}
+    thead {{ display: table-header-group; }}
+    th {{ padding: 8px 9px; border: 1px solid #194642; background: #194642; color: #fff; text-align: left; font-size: 9px; }}
+    td {{ padding: 8px 9px; border: 1px solid #d0d7d3; vertical-align: top; overflow-wrap: anywhere; word-break: normal; }}
+    tbody tr:nth-child(even) {{ background: #f2f5f3; }}
+    tr {{ break-inside: avoid; page-break-inside: avoid; }}
+    .footnote {{ margin-top: 12px; color: #78817f; font-size: 8px; }}
+  </style>
+</head>
+<body>
+  <p class="brand">QUOTE BOT AI</p>
+  <h1>Quotation output</h1>
+  <p class="meta">Based on {int(comparison_count)} completed comparisons and {int(quote_count)} quotations · {escape(created)}</p>
+  <p class="summary-label">Quote AI response</p>
+  <p class="summary">{escape(reply)}</p>
+  <table aria-label="Quotation comparison">
+    <colgroup><col class="company"><col class="item"><col class="price"><col class="requirement"></colgroup>
+    <thead><tr>{headers}</tr></thead>
+    <tbody>{"".join(body_rows)}</tbody>
+  </table>
+  <p class="footnote">Internal staff reference. Confirm source quotation details before making a purchase decision.</p>
+</body>
+</html>"""
 
-    page_streams = []
-    for page_number, page_commands in enumerate(pages, start=1):
-        page_commands.append(_text(
-            MARGIN_X + TABLE_WIDTH - 45, 20, f"Page {page_number} of {len(pages)}",
-            7, False, (0.42, 0.47, 0.45)))
-        page_streams.append("".join(page_commands).encode("ascii"))
-    return _pdf_document(page_streams)
+
+def build_quote_chat_pdf(reply, items, comparison_count, quote_count):
+    """Render a response summary and the requested four-column quote table."""
+    chromium = shutil.which("chromium")
+    if not chromium:
+        raise QuoteChatPdfError("PDF generation is unavailable because this server has no Chromium renderer.")
+
+    with tempfile.TemporaryDirectory(prefix="quote-ai-pdf-") as directory:
+        temp = Path(directory)
+        html_path = temp / "report.html"
+        pdf_path = temp / "report.pdf"
+        html_path.write_text(
+            _html_document(reply, items, comparison_count, quote_count),
+            encoding="utf-8",
+        )
+        environment = {
+            "PATH": f"{Path(chromium).parent}:/usr/bin:/bin",
+            "HOME": directory,
+            "TMPDIR": directory,
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+        }
+        command = [
+            chromium,
+            "--headless=new",
+            "--disable-gpu",
+            "--disable-dev-shm-usage",
+            "--disable-background-networking",
+            "--disable-extensions",
+            "--disable-crash-reporter",
+            "--no-first-run",
+            f"--user-data-dir={temp / 'profile'}",
+            "--no-pdf-header-footer",
+            f"--print-to-pdf={pdf_path}",
+            html_path.as_uri(),
+        ]
+        try:
+            result = subprocess.run(
+                command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, timeout=25, check=False, env=environment,
+            )
+        except subprocess.TimeoutExpired:
+            raise QuoteChatPdfError("PDF generation timed out. Please try the message again.") from None
+        except OSError:
+            raise QuoteChatPdfError("The server could not start its PDF renderer.") from None
+        if result.returncode != 0 or not pdf_path.is_file():
+            raise QuoteChatPdfError("The PDF could not be generated. Please try the message again.")
+        pdf = pdf_path.read_bytes()
+        if not pdf.startswith(b"%PDF-") or len(pdf) > 8_000_000:
+            raise QuoteChatPdfError("The PDF renderer returned an invalid document.")
+        return pdf

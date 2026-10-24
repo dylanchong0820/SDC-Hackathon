@@ -67,7 +67,7 @@ Explain how your project uses AI to solve the problem and what makes it valuable
 ### Key Features
 
 - **Shared WhatsApp inbox** — Receive messages and attachments; staff can reply using the business number.
-- **Price comparison** — Compare selected quotations using price, delivery time, or both.
+- **Price comparison** — Compare selected quotations using price, delivery time, or both. A running comparison can be stopped so you can change the selected sources or priority. Results arriving after cancellation are discarded; the current OpenAI-compatible RunPod endpoint may continue processing remotely until it finishes or times out.
 - **Quotation register** — Review saved analysis details and export the records as an Excel workbook.
 - **Quote AI Chat** — Ask questions using all saved completed comparisons and download each answer as a PDF with company, item, price, and requirement columns. Chat responses are not sent to customers.
 
@@ -121,6 +121,9 @@ User ──► Replit (App / API) ──► RunPod Endpoint (GPU model)
 ---
 
 ## How to Run
+
+Quote AI PDF downloads require Chromium to be available on the runtime `PATH`.
+Generated PDFs are returned to the browser and are not stored in the inbox archive.
 
 ### Option 1 — Run on Replit (Recommended)
 
