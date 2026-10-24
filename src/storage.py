@@ -11,6 +11,11 @@ import threading
 import time
 import uuid
 
+if __package__:
+    from .quote_retry import ranked_message_ids, with_retry_metadata
+else:
+    from quote_retry import ranked_message_ids, with_retry_metadata
+
 
 # Serialize the complete connection lifecycle, not just writes. Concurrent
 # open/close calls have stalled in the runtime's SQLite inode/FD-list mutex.
@@ -271,7 +276,7 @@ class Store:
             raise ValueError("Only client messages can be reviewed.")
         return [by_id[item] for item in ids]
 
-    def create_quote_evaluation(self, message_ids, priority, reviewed_digests=None):
+    def create_quote_evaluation(self, message_ids, priority, reviewed_digests=None, retry_of=None):
         if priority not in {"price", "time", "balanced"}:
             raise ValueError("Choose price, delivery time, or balanced comparison.")
         if not isinstance(message_ids, list) or not 1 <= len(message_ids) <= 8:
@@ -287,6 +292,47 @@ class Store:
 
         placeholders = ",".join("?" for _ in ids)
         with self.db() as db:
+            retry = None
+            if retry_of is not None:
+                previous = db.execute(
+                    "SELECT * FROM quote_evaluations WHERE id=?", (retry_of,)).fetchone()
+                if not previous:
+                    raise ValueError("The original comparison is no longer available.")
+                if previous["status"] not in {"completed", "failed", "cancelled"}:
+                    raise ValueError("Wait for the original comparison to finish before retrying.")
+                sources = db.execute("""
+                    SELECT message_id,reviewed_digest FROM quote_evaluation_sources
+                    WHERE evaluation_id=? ORDER BY position
+                """, (retry_of,)).fetchall()
+                if ids != [row["message_id"] for row in sources]:
+                    raise ValueError("Review and confirm every original source before retrying.")
+                old_result = json.loads(previous["result_json"] or "{}")
+                successful = {
+                    quote["message_id"]: quote for quote in old_result.get("quotes", [])
+                    if not quote.get("extraction_error")
+                }
+                if len(successful) == len(sources):
+                    raise ValueError("This comparison has no failed or unfinished sources to retry.")
+                retained = {}
+                for source in sources:
+                    message_id = source["message_id"]
+                    digest = (reviewed_digests or {}).get(message_id)
+                    if not digest:
+                        raise ValueError("Review and confirm every original source before retrying.")
+                    if message_id in successful:
+                        if not source["reviewed_digest"] or digest != source["reviewed_digest"]:
+                            raise ValueError(
+                                "A successful source changed or has no saved review. "
+                                "Review the sources and start a new comparison instead.")
+                        retained[message_id] = {"quote": successful[message_id], "digest": digest}
+                priority = previous["priority"]
+                retry = {
+                    "of": retry_of,
+                    "retained": retained,
+                    "previous_ranking": (
+                        ranked_message_ids(old_result) if previous["status"] == "completed" else None),
+                    "previous_recommendation": old_result.get("recommendation_message_id"),
+                }
             rows = db.execute(f"""
                 SELECT id,conversation_id,direction,type,body,caption,attachment_state,
                        attachment_path,media_id
@@ -312,6 +358,11 @@ class Store:
                 VALUES (?,?,?,'queued')
             """, (now, now, priority))
             evaluation_id = cursor.lastrowid
+            if retry:
+                db.execute("UPDATE quote_evaluations SET result_json=? WHERE id=?",
+                           (json.dumps({"partial": True, "quotes": [
+                               item["quote"] for item in retry["retained"].values()
+                           ], "retry": retry}, ensure_ascii=False), evaluation_id))
             db.executemany("""
                 INSERT INTO quote_evaluation_sources
                     (evaluation_id,message_id,conversation_id,position,reviewed_digest)
@@ -324,7 +375,7 @@ class Store:
     def quote_evaluation_inputs(self, evaluation_id):
         with self.db() as db:
             evaluation = db.execute(
-                "SELECT id,priority,status FROM quote_evaluations WHERE id=?",
+                "SELECT id,priority,status,result_json FROM quote_evaluations WHERE id=?",
                 (evaluation_id,)).fetchone()
             if not evaluation:
                 return None
@@ -373,9 +424,13 @@ class Store:
         with self.db() as db:
             row = db.execute(
                 "SELECT * FROM quote_evaluations WHERE id=?", (evaluation_id,)).fetchone()
+            source_ids = [source["message_id"] for source in db.execute(
+                "SELECT message_id FROM quote_evaluation_sources WHERE evaluation_id=? ORDER BY position",
+                (evaluation_id,))]
         if not row:
             return None
         result = dict(row)
+        result["source_message_ids"] = source_ids
         try:
             result["result"] = json.loads(result.pop("result_json") or "{}")
         except (TypeError, ValueError):
@@ -389,9 +444,20 @@ class Store:
                 SELECT * FROM quote_evaluations
                 ORDER BY created_at DESC,id DESC LIMIT ?
             """, (max(1, min(int(limit), 50)),)).fetchall()
+            sources = db.execute("""
+                SELECT evaluation_id,message_id FROM quote_evaluation_sources
+                WHERE evaluation_id IN (
+                    SELECT id FROM quote_evaluations
+                    ORDER BY created_at DESC,id DESC LIMIT ?
+                ) ORDER BY evaluation_id,position
+            """, (max(1, min(int(limit), 50)),)).fetchall()
+        source_ids = {}
+        for source in sources:
+            source_ids.setdefault(source["evaluation_id"], []).append(source["message_id"])
         result = []
         for row in rows:
             item = dict(row)
+            item["source_message_ids"] = source_ids.get(item["id"], [])
             try:
                 item["result"] = json.loads(item.pop("result_json") or "{}")
             except (TypeError, ValueError):
@@ -416,7 +482,10 @@ class Store:
                 if result.get("myr_version") == 1 and (
                         not retry or time.time() - result.get("fx_checked_at", 0) < 60):
                     continue
-                converted = converter(quotes, row["priority"])
+                # Currency ranking replaces derived prices, not saved retry
+                # provenance, retained-fact digests, or analysis progress.
+                converted = {**result, **converter(quotes, row["priority"])}
+                with_retry_metadata(converted, result.get("retry"))
             except (ValueError, TypeError, AttributeError):
                 continue
             with self.db() as db:

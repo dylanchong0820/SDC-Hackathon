@@ -1,5 +1,6 @@
 """Quote comparison uses isolated messages and never calls a live provider."""
 import base64
+import json
 import os
 import shutil
 import subprocess
@@ -529,6 +530,271 @@ class QuoteAnalysisTests(unittest.TestCase):
         self.assertEqual(by_id["usable-one"]["myr_total_price"], 120)
         self.assertIn("timeout", by_id["timeout-two"]["extraction_error"])
         self.assertTrue(any("1 of 2" in note for note in saved["result"]["limitations"]))
+
+    def mixed_retry_fixture(self):
+        self.login()
+        self.add_message("retry-good", "MYR 120, delivery in 3 days.")
+        self.add_message("retry-timeout", "MYR 80, delivery in 2 days.")
+        review = self.post("/api/quote-previews", {
+            "message_ids": ["retry-good", "retry-timeout"]}).json
+        original = self.post("/api/quote-evaluations", {
+            "message_ids": ["retry-good", "retry-timeout"], "priority": "price",
+            "review_token": review["review_token"]}).json["evaluation"]
+        worker = QuoteAnalysisWorker(
+            self.store, "https://example.api.runpod.ai", "fake-test-key")
+        worker.model_id = "test-model"
+
+        def mixed_response(parts, *_):
+            if any("Quotation QUOTE_2" in part.get("text", "") for part in parts):
+                raise QuoteAnalysisError("RunPod comparison request timed out.")
+            return {"quotes": [{
+                "quote_key": "QUOTE_1", "vendor": "Saved supplier", "currency": "MYR",
+                "total_price": 120, "delivery_days": 3, "delivery_unit": "calendar_days",
+                "evidence": "MYR 120",
+            }]}
+
+        with patch.object(worker, "_request_model", side_effect=mixed_response):
+            worker._analyze(original["id"])
+        original = self.store.quote_evaluation(original["id"])
+        self.assertEqual(original["status"], "completed")
+        return original, review, worker
+
+    def start_retry(self, original, review):
+        return self.post(f"/api/quote-evaluations/{original['id']}/retry", {
+            "message_ids": original["source_message_ids"],
+            "review_token": review["review_token"],
+        })
+
+    def test_retry_only_failed_source_retains_facts_and_shows_changed_ranking(self):
+        original, review, worker = self.mixed_retry_fixture()
+        self.store.select_quote(original["id"], "retry-good")
+        started = self.start_retry(original, review)
+        self.assertEqual(started.status_code, 202)
+        retry = started.json["evaluation"]
+        self.assertNotEqual(retry["id"], original["id"])
+        self.assertIsNone(retry["selected_message_id"])
+        self.assertEqual(retry["priority"], "price")
+        with patch.object(worker, "_request_model", return_value={"quotes": [{
+            "quote_key": "QUOTE_2", "vendor": "Recovered supplier", "currency": "MYR",
+            "total_price": 80, "delivery_days": 2, "delivery_unit": "calendar_days",
+        }]}) as request:
+            worker._analyze(retry["id"])
+        request.assert_called_once()
+        prompt = str(request.call_args)
+        self.assertIn("Quotation QUOTE_2", prompt)
+        self.assertNotIn("MYR 120", prompt)
+        saved = self.store.quote_evaluation(retry["id"])
+        self.assertEqual(saved["status"], "completed")
+        result = saved["result"]
+        retained = next(quote for quote in result["quotes"] if quote["message_id"] == "retry-good")
+        before = next(quote for quote in original["result"]["quotes"] if quote["message_id"] == "retry-good")
+        for field in ("vendor", "currency", "total_price", "delivery_days", "evidence"):
+            self.assertEqual(retained[field], before[field])
+        self.assertTrue(result["retry"]["ranking_changed"])
+        self.assertTrue(result["retry"]["recommendation_changed"])
+        self.assertEqual(result["recommendation_message_id"], "retry-timeout")
+        self.assertEqual(self.store.quote_evaluation(original["id"])["result"], original["result"])
+        self.assertEqual(self.store.quote_evaluation(original["id"])["selected_message_id"], "retry-good")
+        with self.store.db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM messages WHERE direction='outbound'").fetchone()[0], 0)
+        # Once every source succeeded, there is nothing left to retry.
+        self.assertEqual(self.start_retry(saved, review).status_code, 400)
+
+    def test_retry_preserves_session_review_and_exact_original_source_set(self):
+        original, review, _ = self.mixed_retry_fixture()
+        url = f"/api/quote-evaluations/{original['id']}/retry"
+        self.assertEqual(self.post(url, {}).status_code, 400)
+        self.assertEqual(self.client.post(url, json={}).status_code, 403)
+        anonymous = self.app.test_client()
+        csrf = anonymous.get("/api/session").json["csrf_token"]
+        self.assertEqual(anonymous.post(url, json={}, headers={"X-CSRF-Token": csrf}).status_code, 401)
+        self.assertEqual(self.post(url, {
+            "message_ids": ["retry-timeout"], "review_token": review["review_token"],
+        }).status_code, 400)
+        with self.client.session_transaction() as session:
+            session["csrf"] = "another-staff-session"
+        self.csrf = self.client.get("/api/session").json["csrf_token"]
+        self.assertEqual(self.start_retry(original, review).status_code, 400)
+
+    def test_retry_keeps_ranking_unchanged_when_recovered_source_is_not_comparable(self):
+        original, review, worker = self.mixed_retry_fixture()
+        retry = self.start_retry(original, review).json["evaluation"]
+        with patch.object(worker, "_request_model", return_value={"quotes": [{
+            "quote_key": "QUOTE_2", "vendor": "No stated price", "currency": "MYR",
+        }]}):
+            worker._analyze(retry["id"])
+        saved = self.store.quote_evaluation(retry["id"])
+        self.assertEqual(saved["status"], "completed")
+        self.assertFalse(saved["result"]["retry"]["ranking_changed"])
+        self.assertFalse(saved["result"]["retry"]["recommendation_changed"])
+        self.assertEqual(saved["result"]["recommendation_message_id"], "retry-good")
+
+    def test_currency_refresh_preserves_retry_and_second_retry_sends_only_failed_source(self):
+        self.login()
+        ids = ["refresh-priced", "refresh-delivery", "refresh-timeout"]
+        for message_id, text in zip(ids, [
+            "MYR 120, delivery in 3 days.", "Delivery in 2 days; price on request.",
+            "MYR 80, delivery in 4 days.",
+        ]):
+            self.add_message(message_id, text)
+        review = self.post("/api/quote-previews", {"message_ids": ids}).json
+        original = self.post("/api/quote-evaluations", {
+            "message_ids": ids, "priority": "price",
+            "review_token": review["review_token"],
+        }).json["evaluation"]
+        worker = QuoteAnalysisWorker(self.store, "https://example.api.runpod.ai", "test-key")
+        worker.model_id = "test-model"
+
+        def mixed(parts, *_):
+            if "Quotation QUOTE_3" in str(parts):
+                raise QuoteAnalysisError("RunPod comparison request timed out.")
+            if "Quotation QUOTE_2" in str(parts):
+                return {"quotes": [{
+                    "quote_key": "QUOTE_2", "delivery_days": 2, "delivery_unit": "calendar_days",
+                }]}
+            return {"quotes": [{"quote_key": "QUOTE_1", "currency": "MYR", "total_price": 120}]}
+
+        with patch.object(worker, "_request_model", side_effect=mixed):
+            worker._analyze(original["id"])
+        original = self.store.quote_evaluation(original["id"])
+        first = self.start_retry(original, review).json["evaluation"]
+        with patch.object(worker, "_request_model", side_effect=mixed) as request:
+            worker._analyze(first["id"])
+        request.assert_called_once()
+        first = self.store.quote_evaluation(first["id"])
+        retry_metadata = first["result"]["retry"]
+        progress = first["result"]["progress"]
+        self.assertEqual(set(retry_metadata["retained"]), set(ids[:2]))
+        self.assertTrue(first["result"]["quotes"][1]["conversion_error"])
+        # Both saved-comparison routes invoke the normal automatic currency
+        # refresh. Force its time window to elapse before each request.
+        for route in (f"/api/quote-evaluations/{first['id']}", "/api/quote-evaluations"):
+            snapshot = self.store.quote_evaluation(first["id"])["result"]
+            snapshot["fx_checked_at"] = 0
+            with self.store.db() as db:
+                db.execute("UPDATE quote_evaluations SET result_json=? WHERE id=?",
+                           (json.dumps(snapshot), first["id"]))
+            self.assertEqual(self.client.get(route).status_code, 200)
+            refreshed = self.store.quote_evaluation(first["id"])
+            self.assertEqual(refreshed["result"]["retry"], retry_metadata)
+            self.assertEqual(refreshed["result"]["progress"], progress)
+            self.assertGreater(refreshed["result"]["fx_checked_at"], 0)
+        # The next attempt still retains both successful source facts, including
+        # the valid delivery-only result, instead of requesting them again.
+        second = self.start_retry(refreshed, review).json["evaluation"]
+        self.assertEqual(set(second["result"]["retry"]["retained"]), set(ids[:2]))
+        with patch.object(worker, "_request_model", return_value={"quotes": [{
+            "quote_key": "QUOTE_3", "currency": "MYR", "total_price": 80,
+        }]}) as request:
+            worker._analyze(second["id"])
+        request.assert_called_once()
+        self.assertIn("Quotation QUOTE_3", str(request.call_args))
+        self.assertNotIn("Quotation QUOTE_1", str(request.call_args))
+        self.assertNotIn("Quotation QUOTE_2", str(request.call_args))
+        self.assertEqual(self.store.quote_evaluation(second["id"])["status"], "completed")
+
+    def test_currency_refresh_recomputes_retry_change_notices_against_original(self):
+        original, review, worker = self.mixed_retry_fixture()
+        worker.rate_provider = lambda: {}
+        retry = self.start_retry(original, review).json["evaluation"]
+        with patch.object(worker, "_request_model", return_value={"quotes": [{
+            "quote_key": "QUOTE_2", "currency": "USD", "total_price": 200,
+        }]}):
+            worker._analyze(retry["id"])
+        saved = self.store.quote_evaluation(retry["id"])
+        self.assertIsNone(saved["result"]["recommendation_message_id"])
+        self.assertTrue(saved["result"]["retry"]["recommendation_changed"])
+        self.assertTrue(saved["result"]["retry"]["ranking_changed"])
+        snapshot = saved["result"]
+        snapshot["fx_checked_at"] = 0
+        with self.store.db() as db:
+            db.execute("UPDATE quote_evaluations SET result_json=? WHERE id=?",
+                       (json.dumps(snapshot), retry["id"]))
+        rates = {"USD": {"rate": 4, "date": "2026-10-23", "source": "test reference"}}
+        self.app.config["MYR_RATE_PROVIDER"] = lambda: rates
+        refreshed = self.client.get(f"/api/quote-evaluations/{retry['id']}").json["evaluation"]
+        self.assertEqual(refreshed["result"]["recommendation_message_id"], "retry-good")
+        self.assertFalse(refreshed["result"]["retry"]["recommendation_changed"])
+        self.assertTrue(refreshed["result"]["retry"]["ranking_changed"])
+        for field in ("of", "retained", "previous_ranking", "previous_recommendation"):
+            self.assertEqual(refreshed["result"]["retry"][field], saved["result"]["retry"][field])
+
+    def test_retry_changed_success_requires_new_comparison_and_failed_source_needs_review(self):
+        original, review, worker = self.mixed_retry_fixture()
+        with self.store.db() as db:
+            db.execute("UPDATE messages SET body='MYR 999' WHERE id='retry-good'")
+        new_review = self.post("/api/quote-previews", {
+            "message_ids": original["source_message_ids"]}).json
+        rejected = self.start_retry(original, new_review)
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("start a new comparison", rejected.json["error"])
+        # A stale signed review cannot bypass the worker's content checks.
+        started = self.start_retry(original, review).json["evaluation"]
+        with patch.object(worker, "_request_model") as request:
+            with self.assertRaisesRegex(QuoteAnalysisError, "retained source"):
+                worker._analyze(started["id"])
+        request.assert_not_called()
+        with self.store.db() as db:
+            db.execute("UPDATE messages SET body='MYR 120, delivery in 3 days.' WHERE id='retry-good'")
+            db.execute("UPDATE messages SET body='MYR 75, delivery in 2 days.' WHERE id='retry-timeout'")
+        stale = self.start_retry(original, review).json["evaluation"]
+        with patch.object(worker, "_request_model") as request:
+            with self.assertRaises(QuoteAnalysisError):
+                worker._analyze(stale["id"])
+        request.assert_not_called()
+        fresh = self.post("/api/quote-previews", {
+            "message_ids": original["source_message_ids"]}).json
+        updated = self.start_retry(original, fresh).json["evaluation"]
+        with patch.object(worker, "_request_model", return_value={"quotes": [{
+            "quote_key": "QUOTE_2", "currency": "MYR", "total_price": 75,
+        }]}) as request:
+            worker._analyze(updated["id"])
+        request.assert_called_once()
+        self.assertEqual(self.store.quote_evaluation(updated["id"])["status"], "completed")
+
+    def test_retry_cancellation_keeps_original_and_discards_late_recovered_result(self):
+        original, review, worker = self.mixed_retry_fixture()
+        retry = self.start_retry(original, review).json["evaluation"]
+        started, release = threading.Event(), threading.Event()
+
+        def delayed(*_):
+            started.set()
+            release.wait(5)
+            return {"quotes": [{"quote_key": "QUOTE_2", "currency": "MYR", "total_price": 80}]}
+
+        self.app.extensions["quote_worker"] = worker
+        try:
+            with patch.object(worker, "_request_model", side_effect=delayed):
+                worker.submit(retry["id"])
+                self.assertTrue(started.wait(3))
+                cancelled = self.post(f"/api/quote-evaluations/{retry['id']}/cancel", {})
+                self.assertEqual(cancelled.status_code, 200)
+                release.set()
+                worker.jobs.join()
+            saved = self.store.quote_evaluation(retry["id"])
+            self.assertEqual(saved["status"], "cancelled")
+            self.assertEqual([quote["message_id"] for quote in saved["result"]["quotes"]], ["retry-good"])
+            self.assertEqual(self.store.quote_evaluation(original["id"])["result"], original["result"])
+            # A stopped retry can itself be retried without losing its successful fact.
+            self.app.extensions["quote_worker"] = self.worker
+            self.assertEqual(self.start_retry(saved, review).status_code, 202)
+        finally:
+            release.set()
+
+    def test_retry_source_deletion_removes_original_and_retry_without_resurrection(self):
+        original, review, worker = self.mixed_retry_fixture()
+        retry = self.start_retry(original, review).json["evaluation"]
+
+        def delete_during_request(*_):
+            with self.store.db() as db:
+                db.execute("DELETE FROM messages WHERE id='retry-timeout'")
+            return {"quotes": [{"quote_key": "QUOTE_2", "currency": "MYR", "total_price": 80}]}
+
+        with patch.object(worker, "_request_model", side_effect=delete_during_request):
+            worker._analyze(retry["id"])
+        self.assertIsNone(self.store.quote_evaluation(original["id"]))
+        self.assertIsNone(self.store.quote_evaluation(retry["id"]))
+        self.assertEqual(self.start_retry(original, review).status_code, 404)
 
     def test_quote_sources_are_private_persisted_and_selectable(self):
         self.add_message("quote-one", "MYR 950, delivery within 6 calendar days.")

@@ -462,8 +462,9 @@ def create_app(config=None):
         return jsonify(sources=sources, review_token=token, expires_in=600)
 
     @app.post("/api/quote-evaluations")
+    @app.post("/api/quote-evaluations/<int:retry_of>/retry")
     @require_staff
-    def create_quote_evaluation():
+    def create_quote_evaluation(retry_of=None):
         data = json_body()
         token = data.get("review_token")
         if not isinstance(token, str) or not token or len(token) > 20000:
@@ -481,8 +482,13 @@ def create_app(config=None):
                 or any(not isinstance(item, str) or item not in digests for item in ids)):
             return jsonify(error="Confirm only sources reviewed in this staff session."), 400
         try:
+            if retry_of is not None:
+                previous = store.quote_evaluation(retry_of)
+                if not previous:
+                    return jsonify(error="The original comparison is no longer available."), 404
             evaluation = store.create_quote_evaluation(
-                ids, data.get("priority"), reviewed_digests=digests)
+                ids, previous["priority"] if retry_of is not None else data.get("priority"),
+                reviewed_digests=digests, retry_of=retry_of)
         except ValueError as error:
             return jsonify(error=str(error)), 400
         try:

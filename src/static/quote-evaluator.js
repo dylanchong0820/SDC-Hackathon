@@ -224,7 +224,9 @@
         const section = el("section", "qe-panel qe-review");
         section.setAttribute("aria-label", "Review extracted sources");
         section.appendChild(sectionHeading("03", "Review before sending", "Local extraction only"));
-        section.appendChild(el("p", "qe-panel-hint", "Check the extracted text for mistakes. Tick only the sources you approve. Reviews expire after 10 minutes; originals are never edited."));
+        section.appendChild(el("p", "qe-panel-hint", state.review.retryOf
+          ? "Confirm every original source. Unchanged successful facts stay saved and are not sent to AI again; only failed or unfinished sources are sent. The original comparison priority is kept. If a successful source changed, start a new comparison. No WhatsApp reply is sent."
+          : "Check the extracted text for mistakes. Tick only the sources you approve. Reviews expire after 10 minutes; originals are never edited."));
         (state.review.sources || []).forEach((source) => {
           const article = el("article", "qe-review-source");
           const label = el("label", "qe-review-confirm");
@@ -260,8 +262,9 @@
           }
           section.appendChild(article);
         });
-        const send = button(state.submitting ? "Starting analysis…" : `Send confirmed to AI (${state.confirmed.size})`, "qe-primary-button", startEvaluation);
-        send.disabled = !state.confirmed.size || state.submitting || state.loading || Boolean(state.evaluation && isActive(state.evaluation));
+        const send = button(state.submitting ? "Starting analysis…" : state.review.retryOf
+          ? "Retry failed sources only" : `Send confirmed to AI (${state.confirmed.size})`, "qe-primary-button", startEvaluation);
+        send.disabled = !state.confirmed.size || (state.review.retryOf && state.confirmed.size !== state.review.sources.length) || state.submitting || state.loading || Boolean(state.evaluation && isActive(state.evaluation));
         section.appendChild(send);
         return section;
       }
@@ -357,6 +360,31 @@
           resultHead.appendChild(el("p", "qe-inline-error", evaluation.error || "Analysis could not be completed."));
         }
         section.appendChild(resultHead);
+        const sourceIds = evaluation.source_message_ids || [];
+        const successfulIds = new Set((result.quotes || [])
+          .filter((quote) => !quote.extraction_error).map((quote) => quote.message_id));
+        if (!isActiveEvaluation && sourceIds.some((id) => !successfulIds.has(id))) {
+          const retryButton = button("Review and retry failed sources", "qe-secondary-button",
+            () => reviewSelection(evaluation));
+          retryButton.disabled = state.reviewing || state.submitting;
+          section.appendChild(retryButton);
+        }
+        if (result.retry) {
+          const retry = result.retry;
+          let note = `Retry of comparison #${retry.of}. ${Object.keys(retry.retained || {}).length} successful source results retained; only failed or unfinished sources are re-analyzed.`;
+          if (evaluation.status === "completed") {
+            note += retry.ranking_changed === null
+              ? " The original had no final ranking; this is the first final ranking."
+              : retry.ranking_changed ? " Final ranking changed." : " Final ranking unchanged.";
+            if (retry.recommendation_changed) {
+              const previous = (result.quotes || []).find((quote) => quote.message_id === retry.previous_recommendation);
+              const next = (result.quotes || []).find((quote) => quote.message_id === result.recommendation_message_id);
+              note += ` Recommendation changed from ${previous ? previous.vendor || previous.client_name || previous.filename || previous.message_id : "none"} to ${next ? next.vendor || next.client_name || next.filename || next.message_id : "none"}.`;
+            }
+            note += " Any choice in the original comparison is unchanged. Select a quotation here separately.";
+          }
+          section.appendChild(el("p", "qe-progress-note", note));
+        }
         if (isActiveEvaluation && (!Array.isArray(result.quotes) || !result.quotes.length)) {
           const progress = el("div", "qe-progress");
           progress.setAttribute("role", "status");
@@ -384,7 +412,7 @@
               "p", "qe-progress-note qe-partial-note",
               isActiveEvaluation
                 ? "Partial results are shown as each source finishes. Final ranking and MYR conversion appear when analysis completes."
-                : "These are saved partial results, not a final ranking. Start a new comparison to analyze all sources again."
+                : "These are saved partial results, not a final ranking. Review and retry failed sources to keep validated facts, or start a new comparison."
             ));
           }
           const tableWrap = el("div", "qe-table-wrap");
@@ -611,8 +639,11 @@
       }
     }
 
-    async function reviewSelection() {
-      if (state.submitting || state.reviewing || !state.selected.size) return;
+    async function reviewSelection(retryEvaluation = null) {
+      // Button events are not comparison records.
+      if (!retryEvaluation || !retryEvaluation.id) retryEvaluation = null;
+      const ids = retryEvaluation ? retryEvaluation.source_message_ids : Array.from(state.selected);
+      if (state.submitting || state.reviewing || !ids || !ids.length) return;
       state.reviewing = true;
       state.review = null;
       state.confirmed.clear();
@@ -620,9 +651,9 @@
       render();
       try {
         const response = await request("/api/quote-previews", {
-          method: "POST", body: { message_ids: Array.from(state.selected) }
+          method: "POST", body: { message_ids: ids }
         });
-        if (!state.destroyed) state.review = response;
+        if (!state.destroyed) state.review = { ...response, retryOf: retryEvaluation && retryEvaluation.id };
       } catch (error) {
         state.error = error && error.message ? error.message : "Could not extract the selected sources.";
       } finally {
@@ -641,9 +672,12 @@
       state.error = "";
       render();
       try {
-        const response = await request("/api/quote-evaluations", {
+        const retryOf = state.review.retryOf;
+        const ids = retryOf ? state.review.sources.map((source) => source.id) : Array.from(state.confirmed);
+        if (retryOf && ids.some((id) => !state.confirmed.has(id))) throw new Error("Confirm every original source before retrying.");
+        const response = await request(retryOf ? `/api/quote-evaluations/${encodeURIComponent(retryOf)}/retry` : "/api/quote-evaluations", {
           method: "POST",
-          body: { message_ids: Array.from(state.confirmed), priority: state.priority,
+          body: { message_ids: ids, priority: state.priority,
             review_token: state.review.review_token }
         });
         state.evaluation = response && response.evaluation;

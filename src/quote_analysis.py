@@ -25,8 +25,10 @@ import requests
 
 if __package__:
     from .quote_currency import convert_quote, get_myr_rates
+    from .quote_retry import with_retry_metadata
 else:
     from quote_currency import convert_quote, get_myr_rates
+    from quote_retry import with_retry_metadata
 
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
 MAX_MEDIA_BYTES = 5 * 1024 * 1024
@@ -1343,6 +1345,8 @@ class QuoteAnalysisWorker:
             raise QuoteAnalysisError("RUNPOD_API_KEY is not configured in Replit Secrets.")
 
         total = len(current["messages"])
+        retry = json.loads(current["evaluation"]["result_json"] or "{}").get("retry")
+        retained = retry.get("retained", {}) if retry else {}
         prepared = []
         partial_quotes = {}
         completed_requests = 0
@@ -1362,6 +1366,8 @@ class QuoteAnalysisWorker:
                     "prepared": prepared_count,
                 },
             }
+            if retry:
+                result["retry"] = retry
             updated = self.store.update_quote_evaluation(
                 evaluation_id, "processing", result=result)
             return bool(updated and updated["status"] == "processing")
@@ -1380,13 +1386,26 @@ class QuoteAnalysisWorker:
                     if quote_source_digest(parts) != row["reviewed_digest"]:
                         raise QuoteAnalysisError(
                             "This source changed after review. Review it again before sending it to AI.")
+                if row["id"] in retained:
+                    if quote_source_digest(parts) != retained[row["id"]]["digest"]:
+                        raise QuoteAnalysisError(
+                            "A successful source changed. Review it and start a new comparison.")
                 text_part = next((part.get("text", "") for part in parts if part.get("type") == "text"), "")
                 total_text += len(text_part)
                 if total_text > MAX_TOTAL_TEXT_CHARS:
                     raise QuoteAnalysisError("Selected quotation text exceeds the combined analysis limit.")
                 prepared.append((quote_key, candidate, parts, None))
-                request_jobs.append((quote_key, candidate, parts))
+                if row["id"] in retained:
+                    partial_quotes[quote_key] = retained[row["id"]]["quote"]
+                else:
+                    request_jobs.append((quote_key, candidate, parts))
             except QuoteAnalysisError as error:
+                if row["id"] in retained:
+                    # Never rank stale retained facts or send other sources after
+                    # discovering that a previously successful source has changed.
+                    raise QuoteAnalysisError(
+                        "A retained source could not be validated. Review the sources "
+                        "and start a new comparison. " + str(error)) from error
                 candidate = {
                     "id": row["id"],
                     "client_name": row.get("client_name") or "",
@@ -1481,6 +1500,7 @@ class QuoteAnalysisWorker:
                 prepared_count=len(prepared)):
             return
         result = rank_quotes_in_myr(quotes, current["evaluation"]["priority"], self.rate_provider)
+        with_retry_metadata(result, retry)
         failed_count = sum(bool(quote.get("extraction_error")) for quote in quotes)
         if failed_count:
             result["limitations"].append(
