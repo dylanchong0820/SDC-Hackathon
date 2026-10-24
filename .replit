@@ -2,7 +2,7 @@ modules = ["python-3.11", "nodejs-24"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["freetype", "gitFull", "glibcLocales", "playwright-driver"]
+packages = ["freetype", "gitFull", "glibcLocales", "playwright-driver", "tesseract", "gnumeric"]
 
 [workflows]
 runButton = "Project"

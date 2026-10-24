@@ -68,6 +68,10 @@ never advance the live inbound timestamp or activate a reply window.
   saved asynchronously, and retried up to three times. Failed downloads can be
   retried from the website. PDFs and arbitrary WhatsApp-supported documents retain
   their file extensions and names. Unique filenames avoid same-second overwrites.
+- Selected scanned PDFs use local Tesseract OCR on at most the first five pages,
+  bounded by 90 seconds. Selected legacy XLS files are converted from a temporary
+  copy with `ssconvert`; original WhatsApp attachments are never rewritten.
+  `tesseract` and `gnumeric` are declared in `.replit`.
 - Other types retain raw message content (contacts, location, reactions,
   interactive replies, orders, system/future types). Raw payloads are staff-only.
 - Quote AI Chat sends saved completed comparison facts to the configured RunPod model on each request. It omits phone numbers, message IDs, raw attachment files, and unsaved inbox content. Each answer generates a four-column PDF in the response; PDFs and temporary chat transcripts are not stored in inbox history.

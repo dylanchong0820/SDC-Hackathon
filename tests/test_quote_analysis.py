@@ -1,4 +1,8 @@
 """Quote comparison uses isolated messages and never calls a live provider."""
+import base64
+import os
+import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -8,7 +12,16 @@ from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.quote_analysis import QuoteAnalysisWorker, _document_text, rank_quotes
+from src.quote_analysis import (
+    MAX_DOCUMENT_BYTES,
+    MAX_OCR_PAGE_SECONDS,
+    MAX_OCR_PAGES,
+    MAX_XLS_CONVERT_SECONDS,
+    QuoteAnalysisError,
+    QuoteAnalysisWorker,
+    _document_text,
+    rank_quotes,
+)
 from src.server import create_app
 
 
@@ -144,6 +157,119 @@ class QuoteAnalysisTests(unittest.TestCase):
 
         self.store.clear_history(self.conversation["id"], delete_attachments=False)
         self.assertIsNone(self.store.quote_evaluation(evaluation["id"]))
+
+    def test_scanned_pdf_fixture_is_ocrd_locally(self):
+        from playwright.sync_api import sync_playwright
+
+        chromium = (
+            os.getenv("CHROMIUM_PATH")
+            or shutil.which("chromium")
+            or ("/repl/tools/bin/chromium" if Path("/repl/tools/bin/chromium").exists() else None)
+        )
+        self.assertIsNotNone(chromium, "Chromium is needed to build the scanned-PDF fixture.")
+        fixture = Path(__file__).parent / "fixtures" / "scanned-quotation.html"
+        pdf = Path(self.directory.name) / "scanned-quotation.pdf"
+
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=chromium,
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            try:
+                page = browser.new_page(viewport={"width": 1500, "height": 1000})
+                page.goto(fixture.resolve().as_uri(), wait_until="load")
+                scan_png = base64.b64encode(page.screenshot(type="png")).decode("ascii")
+                page.set_content(
+                    "<!doctype html><style>@page{size:A4;margin:0}"
+                    "html,body{margin:0;width:210mm;height:297mm}"
+                    "img{display:block;width:100%;height:auto}</style>"
+                    f'<img alt="" src="data:image/png;base64,{scan_png}">',
+                    wait_until="load",
+                )
+                page.pdf(path=str(pdf), print_background=True)
+            finally:
+                browser.close()
+
+        text = _document_text(pdf, "application/pdf").casefold()
+        self.assertIn("northwind", text)
+        self.assertIn("myr 128", text)
+        self.assertIn(f"first {MAX_OCR_PAGES} pages", text)
+
+    def test_scanned_pdf_ocr_is_capped_at_five_pages(self):
+        pdf = Path(self.directory.name) / "scanned-multipage.pdf"
+        pdf.write_bytes(b"test PDF")
+        commands = []
+
+        def fake_run(args, **kwargs):
+            commands.append((args, kwargs))
+            if args[0] == "pdftotext":
+                return SimpleNamespace(returncode=0, stdout=b"")
+            if args[0] == "pdftoppm":
+                prefix = Path(args[-1])
+                for index in range(1, MAX_OCR_PAGES + 3):
+                    Path(f"{prefix}-{index:02}.jpg").write_bytes(b"jpeg")
+                return SimpleNamespace(returncode=0, stdout=b"")
+            return SimpleNamespace(returncode=0, stdout=b"MYR 128")
+
+        with patch("src.quote_analysis.subprocess.run", side_effect=fake_run):
+            result = _document_text(pdf, "application/pdf")
+        self.assertEqual(
+            sum(args[0] == "tesseract" for args, _ in commands),
+            MAX_OCR_PAGES,
+        )
+        render_args = next(args for args, _ in commands if args[0] == "pdftoppm")
+        self.assertEqual(render_args[render_args.index("-l") + 1], str(MAX_OCR_PAGES))
+        self.assertIn("MYR 128", result)
+        self.assertTrue(all(
+            kwargs.get("timeout", 0) <= MAX_OCR_PAGE_SECONDS
+            for args, kwargs in commands if args[0] == "tesseract"
+        ))
+
+    def test_scanned_pdf_renderer_timeout_is_a_clear_per_file_error(self):
+        pdf = Path(self.directory.name) / "stalled-scan.pdf"
+        pdf.write_bytes(b"test PDF")
+
+        def timeout_renderer(args, **kwargs):
+            if args[0] == "pdftotext":
+                return SimpleNamespace(returncode=0, stdout=b"")
+            raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+        with patch("src.quote_analysis.subprocess.run", side_effect=timeout_renderer):
+            with self.assertRaisesRegex(QuoteAnalysisError, "local OCR time limit"):
+                _document_text(pdf, "application/pdf")
+
+    def test_legacy_xls_fixture_is_read_and_conversion_time_is_bounded(self):
+        fixture = Path(__file__).parent / "fixtures" / "legacy-quotation.csv"
+        xls = Path(self.directory.name) / "legacy-quotation.xls"
+        created = subprocess.run(
+            ["ssconvert", str(fixture), str(xls)],
+            capture_output=True,
+            timeout=MAX_XLS_CONVERT_SECONDS,
+            check=False,
+        )
+        self.assertEqual(created.returncode, 0, created.stderr.decode("utf-8", errors="replace"))
+        extracted = _document_text(xls, "application/vnd.ms-excel")
+        self.assertIn("Northwind Tools", extracted)
+        self.assertIn("MYR 128", extracted)
+        self.assertIn("6 working days", extracted)
+
+        with patch(
+            "src.quote_analysis.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("ssconvert", MAX_XLS_CONVERT_SECONDS),
+        ) as conversion:
+            with self.assertRaisesRegex(QuoteAnalysisError, "25-second limit"):
+                _document_text(xls, "application/vnd.ms-excel")
+        self.assertEqual(conversion.call_args.kwargs["timeout"], MAX_XLS_CONVERT_SECONDS)
+
+    def test_legacy_xls_size_limit_fails_before_conversion(self):
+        oversized = Path(self.directory.name) / "oversized.xls"
+        with oversized.open("wb") as stream:
+            stream.truncate(MAX_DOCUMENT_BYTES + 1)
+        with patch("src.quote_analysis.subprocess.run") as conversion:
+            with self.assertRaisesRegex(QuoteAnalysisError, "20 MB"):
+                _document_text(oversized, "application/vnd.ms-excel")
+        conversion.assert_not_called()
 
     def test_comparison_can_be_cancelled_and_late_results_are_ignored(self):
         self.add_message("quote-cancel", "MYR 125, delivery in 4 days.")

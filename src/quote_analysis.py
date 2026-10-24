@@ -8,6 +8,7 @@ import mimetypes
 import queue
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import zipfile
@@ -27,6 +28,13 @@ MAX_MEDIA_TOTAL_BYTES = 9 * 1024 * 1024
 MAX_EXTRACTED_CHARS = 12_000
 MAX_TOTAL_TEXT_CHARS = 36_000
 MAX_PDF_PAGES = 40
+MAX_OCR_PAGES = 5
+MAX_OCR_SECONDS = 90
+MAX_OCR_RENDER_SECONDS = 25
+MAX_OCR_PAGE_SECONDS = 15
+MAX_OCR_IMAGE_BYTES = 3 * 1024 * 1024
+MAX_XLS_CONVERT_SECONDS = 25
+OCR_LANGUAGES = "eng+msa+chi_sim+chi_tra"
 
 
 class QuoteAnalysisError(RuntimeError):
@@ -135,6 +143,129 @@ def _xlsx_text(path):
     return _bounded_text("\n".join(output))
 
 
+def _xls_text(path):
+    try:
+        if path.stat().st_size > MAX_DOCUMENT_BYTES:
+            raise QuoteAnalysisError("This legacy Excel file exceeds the 20 MB local-reading limit.")
+    except OSError:
+        raise QuoteAnalysisError("Could not access this legacy Excel file.") from None
+
+    with tempfile.TemporaryDirectory(prefix="quote-xls-") as temporary_directory:
+        converted = Path(temporary_directory) / "converted.xlsx"
+        try:
+            result = subprocess.run(
+                ["ssconvert", str(path), str(converted)],
+                capture_output=True,
+                timeout=MAX_XLS_CONVERT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise QuoteAnalysisError(
+                "Reading this legacy Excel file exceeded the 25-second limit. Convert it to XLSX."
+            ) from None
+        except OSError:
+            raise QuoteAnalysisError(
+                "Legacy Excel reading is unavailable in this runtime. Convert the file to XLSX."
+            ) from None
+        if result.returncode != 0 or not converted.is_file():
+            raise QuoteAnalysisError(
+                "Could not read this legacy Excel file. Save it as XLSX and try again."
+            )
+        try:
+            if converted.stat().st_size > MAX_DOCUMENT_BYTES:
+                raise QuoteAnalysisError(
+                    "The converted Excel file exceeds the 20 MB local-reading limit."
+                )
+        except OSError:
+            raise QuoteAnalysisError("Could not read the converted Excel file.") from None
+        return _xlsx_text(converted)
+
+
+def _ocr_pdf(path):
+    deadline = time.monotonic() + MAX_OCR_SECONDS
+    with tempfile.TemporaryDirectory(prefix="quote-pdf-ocr-") as temporary_directory:
+        prefix = Path(temporary_directory) / "page"
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("pdftoppm", MAX_OCR_RENDER_SECONDS)
+            rendered = subprocess.run(
+                [
+                    "pdftoppm", "-f", "1", "-l", str(MAX_OCR_PAGES),
+                    "-scale-to", "1600", "-jpeg", "-jpegopt", "quality=75",
+                    str(path), str(prefix),
+                ],
+                capture_output=True,
+                timeout=min(MAX_OCR_RENDER_SECONDS, remaining),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            raise QuoteAnalysisError(
+                "Rendering this scanned PDF exceeded the local OCR time limit. Try a shorter PDF."
+            ) from None
+        except OSError:
+            raise QuoteAnalysisError(
+                "Scanned-PDF OCR is unavailable in this runtime. Use a searchable PDF or contact an administrator."
+            ) from None
+        if rendered.returncode != 0:
+            raise QuoteAnalysisError("Could not render this scanned PDF for OCR.")
+
+        pages = sorted(Path(temporary_directory).glob("page-*.jpg"))[:MAX_OCR_PAGES]
+        if not pages:
+            raise QuoteAnalysisError("Could not render any pages from this scanned PDF.")
+        total_image_bytes = 0
+        for page in pages:
+            try:
+                page_bytes = page.stat().st_size
+            except OSError:
+                raise QuoteAnalysisError("Could not read a rendered page from this scanned PDF.") from None
+            total_image_bytes += page_bytes
+            if page_bytes > MAX_OCR_IMAGE_BYTES or total_image_bytes > MAX_OCR_IMAGE_BYTES * MAX_OCR_PAGES:
+                raise QuoteAnalysisError("This scanned PDF exceeds the local OCR image-size limit.")
+
+        extracted_pages = []
+        for page in pages:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise QuoteAnalysisError(
+                    "OCR exceeded the 90-second limit. Try a shorter PDF or a searchable copy."
+                )
+            try:
+                result = subprocess.run(
+                    [
+                        "tesseract", str(page), "stdout", "-l", OCR_LANGUAGES,
+                        "--oem", "1", "--psm", "6",
+                    ],
+                    capture_output=True,
+                    timeout=min(MAX_OCR_PAGE_SECONDS, remaining),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                raise QuoteAnalysisError(
+                    "OCR exceeded the 90-second limit. Try a shorter PDF or a searchable copy."
+                ) from None
+            except OSError:
+                raise QuoteAnalysisError(
+                    "Scanned-PDF OCR is unavailable in this runtime. Use a searchable PDF or contact an administrator."
+                ) from None
+            if result.returncode != 0:
+                raise QuoteAnalysisError(
+                    "Could not recognize text in a scanned PDF page. Try a clearer scan."
+                )
+            text = result.stdout.decode("utf-8", errors="replace").strip()
+            if text:
+                extracted_pages.append(text)
+
+    if not extracted_pages:
+        raise QuoteAnalysisError(
+            "OCR found no readable text in this PDF. Try a clearer scan or a searchable PDF."
+        )
+    return _bounded_text(
+        f"[Scanned PDF OCR; at most the first {MAX_OCR_PAGES} pages are included]\n"
+        + "\n".join(extracted_pages)
+    )
+
+
 def _document_text(path, mime_type):
     extension = path.suffix.lower()
     mime_type = (mime_type or mimetypes.guess_type(path.name)[0] or "").split(";", 1)[0].lower()
@@ -168,6 +299,9 @@ def _document_text(path, mime_type):
     if extension in {".xlsx", ".xlsm"}:
         return _xlsx_text(path)
 
+    if extension == ".xls":
+        return _xls_text(path)
+
     if extension == ".doc":
         try:
             result = subprocess.run(
@@ -191,14 +325,12 @@ def _document_text(path, mime_type):
             raise QuoteAnalysisError("Could not extract text from this PDF.")
         extracted = _bounded_text(result.stdout.decode("utf-8", errors="replace"))
         if not extracted.strip():
-            raise QuoteAnalysisError(
-                "This PDF has no selectable text. Scanned PDFs need OCR before analysis."
-            )
+            return _ocr_pdf(path)
         return extracted
 
     raise QuoteAnalysisError(
-        "This file type is not readable here. Supported documents are PDF, DOC, DOCX, XLSX, "
-        "CSV, RTF, TXT, and Markdown. Convert legacy XLS files to XLSX."
+        "This file type is not readable here. Supported documents are PDF (including scanned PDFs), "
+        "DOC, DOCX, XLS, XLSX, CSV, RTF, TXT, and Markdown."
     )
 
 

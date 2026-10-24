@@ -19,11 +19,14 @@ project's configured endpoint. Use an endpoint model that accepts the image and
 audio inputs you intend to analyze.
 
 Analysis supports incoming text, JPEG/PNG/WebP images, OGG/MP3/WAV/M4A/AAC/FLAC
-audio, TXT/Markdown/CSV/RTF, DOC/DOCX, XLSX, and text-based PDFs. Scanned PDFs
-need OCR first; legacy XLS spreadsheets and video files remain archived but are
-not analyzed. Processing limits are 5 MB per image/audio file, 9 MB combined
-image/audio data, and 20 MB per document. PDF and legacy DOC text extraction use
-the `pdftotext` and `antiword` system utilities available in this workspace.
+audio, TXT/Markdown/CSV/RTF, DOC/DOCX, XLS/XLSX, and PDFs. Scanned PDFs are OCRed
+locally in English, Malay, and Simplified/Traditional Chinese, using at most the
+first five pages and a 90-second OCR limit. Legacy XLS files are converted in a
+temporary directory before reading; the original WhatsApp attachment is unchanged.
+Processing limits are 5 MB per image/audio file, 9 MB combined image/audio data,
+and 20 MB per document. PDF, OCR, legacy Excel, and legacy Word reading use the
+`pdftotext`, `pdftoppm`, `tesseract`, `ssconvert`, and `antiword` utilities
+configured in `.replit`. Video files remain archived but are not analyzed.
 
 See [replit.md](replit.md) for the complete configuration, storage behavior,
 security requirements, tests, and deployment limitations.
