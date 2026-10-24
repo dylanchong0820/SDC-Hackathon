@@ -239,6 +239,8 @@ class MediaWorker:
     def run(self):
         while not self.stop_event.is_set():
             try:
+                if hasattr(self.store, "flush_deletions"):
+                    self.store.flush_deletions()
                 active = self.process_one()
             except Exception:
                 logging.error("The attachment queue is unavailable. Pending jobs will be retried.")

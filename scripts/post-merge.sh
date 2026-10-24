@@ -12,3 +12,7 @@ python -m pip install \
   -r requirements.txt
 
 python -m compileall -q src
+
+if [[ "${STORAGE_BACKEND:-sqlite}" == "postgres" && "${REPLIT_DEPLOYMENT:-}" != "1" ]]; then
+  python scripts/setup-dev-database.py
+fi

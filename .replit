@@ -1,8 +1,8 @@
-modules = ["python-3.11", "nodejs-24"]
+modules = ["python-3.11", "nodejs-24", "postgresql-16"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["freetype", "gitFull", "glibcLocales", "playwright-driver", "tesseract", "gnumeric"]
+packages = ["freetype", "gitFull", "glibcLocales", "gnumeric", "playwright-driver", "postgresql", "tesseract", "poppler", "antiword", "chromium", "noto-fonts-cjk-sans"]
 
 [workflows]
 runButton = "Project"
@@ -25,7 +25,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "exec python src/main.py"
+args = "exec gunicorn --config gunicorn.conf.py 'src.production:create_production_app()'"
 waitForPort = 5000
 
 [[ports]]
@@ -35,3 +35,17 @@ externalPort = 80
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 180000
+
+[objectStorage]
+defaultBucketID = "replit-objstore-754f24c5-7338-492d-84e3-257610894722"
+
+[userenv]
+
+[userenv.shared]
+STORAGE_BACKEND = "postgres"
+WHATSAPP_PHONE_NUMBER_ID = "1441593582361913"
+
+[deployment]
+deploymentTarget = "vm"
+run = ["gunicorn", "--config", "gunicorn.conf.py", "src.production:create_production_app()"]
+build = ["bash", "scripts/build-production.sh"]

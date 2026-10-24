@@ -254,6 +254,7 @@
         link.download = message.pdfFilename || "quote-ai-output.pdf";
         document.body.appendChild(link);
         link.click();
+        window.QuoteAnalytics?.trackEvent("report_download_requested", { format: "pdf" });
         link.remove();
         window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       } catch (_error) {

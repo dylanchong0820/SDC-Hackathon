@@ -156,6 +156,12 @@ def run():
                 browser = playwright.chromium.launch(executable_path=CHROMIUM_PATH, headless=True,
                                                        args=["--no-sandbox", "--disable-dev-shm-usage"])
                 page = browser.new_page(viewport={"width": 1440, "height": 1000})
+                page.add_init_script("""
+                    window.__analyticsEvents = [];
+                    window.umami = { track(name, data) {
+                        window.__analyticsEvents.push({name, data});
+                    }};
+                """)
                 page.on("pageerror", lambda error: errors.append(str(error)))
                 page.goto(url)
                 page.get_by_label("Staff password").fill("isolated-browser-test-password")
@@ -429,6 +435,15 @@ def run():
                 assert not store.messages(store.conversations()[0]["id"])["messages"]
                 colleague_context.close()
                 assert not errors, f"Browser errors: {errors}"
+                analytics_events = page.evaluate("window.__analyticsEvents")
+                event_names = {event["name"] for event in analytics_events}
+                for expected_event in (
+                    "staff_login", "workspace_tool_opened", "message_send_result", "history_cleared"
+                ):
+                    assert expected_event in event_names, f"Missing analytics event: {expected_event}"
+                forbidden = {"password", "text", "content", "message_id", "conversation_id",
+                             "client_phone", "review_token", "error"}
+                assert all(not (set(event["data"]) & forbidden) for event in analytics_events)
                 browser.close()
         finally:
             server.shutdown()

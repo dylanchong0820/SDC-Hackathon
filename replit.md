@@ -114,17 +114,29 @@ never advance the live inbound timestamp or activate a reply window.
   Busy archives return HTTP 503 with Retry-After instead of waiting indefinitely.
   Never hold a database context around network requests or attachment downloads.
 
-## Production cautions
+## Production operation
 
-The workflow still uses Flask's development server. A production WSGI server is a
-separate queued project task; when adding it, use `src.server:create_app()` as the
-factory. Download jobs use SQLite leases, allowing recovery after a crash.
+The running workflow and publish configuration use Gunicorn, one threaded worker,
+and `src.production:create_production_app()`. Use Reserved VM: comparison workers
+are local to that process and must not be multiplied by autoscaling or preload.
 
-The archive and SQLite are workspace-local to preserve the original receiver's
-storage behavior. They are NOT an assurance of durable storage on a published
-instance. Before production use, configure persistent storage/App Storage plus a
-durable database and backup/retention policies. Do not deploy or commit private
-archives. `.gitignore` and `.replitignore` exclude `whatsapp_data/`.
+`STORAGE_BACKEND=postgres` selects durable PostgreSQL metadata/readable archive
+entries and private App Storage attachments. Local files in
+`whatsapp_data/cloud-cache/` are disposable. SQLite remains available only for
+isolated tests/local development; the production factory rejects it.
+
+`schema/postgres.sql` is applied to development by `scripts/setup-dev-database.py`
+and the development-only post-merge hook. Production schema is applied only by
+Replit Publish: no startup/build DDL. The one-time development importer preserves
+the original SQLite/text/file archive; it must not run in a deployment.
+
+Development and production attachments have separate object namespaces; copied
+metadata is rehomed before the target environment serves staff. Do not bypass
+this when implementing cleanup. See `docs/PRODUCTION.md` for first-publish data
+copying, webhook setup, archive exports, deletion queues, and retention caveats.
+Never publish or commit private archives. See `docs/AI_MODEL_ATTRIBUTION.md` for
+the commercially permitted external image model; image support does not imply
+audio support.
 
 ## Git scope
 

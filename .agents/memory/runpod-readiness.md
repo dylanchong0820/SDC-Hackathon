@@ -15,7 +15,7 @@ Verify modality support independently of text inference.
 
 **How to apply:** Never promise image or voice support based only on a successful text test. Require format-specific synthetic checks after any model change, and get approval before enabling always-on GPU workers or changing the paid compute configuration.
 
-Keep an image-capable model for this endpoint rather than reverting to the container's default text model. Qwen/Qwen2.5-VL-3B-Instruct was selected for the existing 24 GB GPU; the user approved 20 GB of container disk for its weights/cache, not an always-on worker or a larger GPU.
+Keep a commercially permitted image-capable model for this endpoint rather than reverting to the container's default text model. Qwen/Qwen3-VL-4B-Instruct was selected for the existing 24 GB GPU; the user approved 20 GB of container disk for weights/cache, not an always-on worker or a larger GPU.
 
 **Why:** This preserves the user's requested image support without treating the model-change approval as permission for broader ongoing compute charges.
 
@@ -26,3 +26,9 @@ Do not describe Qwen/Qwen2.5-VL-3B-Instruct as Apache-licensed or suitable for u
 **Why:** Its upstream model card and LICENSE were checked directly on 2026-10-25: this particular size uses the Qwen Research License, permitting research/evaluation only and requiring a separate licence for commercial use. The repository's Apache licence does not cover these external model weights.
 
 **How to apply:** Flag this restriction in competition submissions and before commercial deployment. Seek an appropriately licensed replacement or separate permission rather than assuming all models in the Qwen family share a licence. See https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/main/LICENSE for the authoritative terms.
+
+Synthetic vision acceptance checks must include explicit currency and the absence of invented calendar dates, not only numeric prices and successful HTTP responses.
+
+**Why:** A smaller Apache-licensed replacement read prices but omitted MYR and invented a delivery date that was not on the image. A successful image request was not sufficient for quotation comparison.
+
+**How to apply:** Check company, currency, price, delivery duration, and null dates across supported image formats before accepting a replacement model. The current model's upstream card declares Apache-2.0: https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct.

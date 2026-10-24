@@ -60,6 +60,10 @@ def create_app(config=None):
         RUNPOD_ENDPOINT_URL=os.getenv(
             "RUNPOD_ENDPOINT_URL", "https://by40gb92whagr1.api.runpod.ai"),
         DATA_DIR=PROJECT_ROOT / "whatsapp_data",
+        STORAGE_BACKEND=os.getenv("STORAGE_BACKEND", "sqlite"),
+        DATABASE_URL=os.getenv("DATABASE_URL"),
+        STORAGE_NAMESPACE=("production" if os.getenv("REPLIT_DEPLOYMENT") == "1"
+                           else "development"),
         MEDIA_WORKER=True,
         MAX_CONTENT_LENGTH=9 * 1024 * 1024,
         SESSION_COOKIE_HTTPONLY=True,
@@ -68,8 +72,24 @@ def create_app(config=None):
     )
     if config:
         app.config.update(config)
+    if app.config.get("TESTING") and not (config or {}).get("STORAGE_BACKEND"):
+        app.config["STORAGE_BACKEND"] = "sqlite"
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1)
-    store = Store(app.config["DATA_DIR"])
+    if app.config["STORAGE_BACKEND"] == "postgres":
+        if __package__:
+            from .cloud_storage import CloudStore
+        else:
+            from cloud_storage import CloudStore
+        store = CloudStore(
+            app.config["DATA_DIR"], app.config["DATABASE_URL"],
+            object_client=app.config.get("OBJECT_STORAGE_CLIENT"),
+            namespace=app.config["STORAGE_NAMESPACE"])
+    elif app.config["STORAGE_BACKEND"] == "sqlite":
+        if app.config.get("PRODUCTION"):
+            raise RuntimeError("Publishing requires durable PostgreSQL and App Storage, not SQLite.")
+        store = Store(app.config["DATA_DIR"])
+    else:
+        raise RuntimeError("STORAGE_BACKEND must be postgres or sqlite.")
     graph = app.config.get("GRAPH_CLIENT") or GraphClient(
         app.config["META_ACCESS_TOKEN"], app.config["META_GRAPH_VERSION"])
     app.extensions["store"] = store
@@ -86,7 +106,8 @@ def create_app(config=None):
     def upgrade_quote_currency():
         store.upgrade_quote_currency(lambda quotes, priority: rank_quotes_in_myr(
             quotes, priority, app.config.get("MYR_RATE_PROVIDER")))
-    if os.getenv("WHATSAPP_PHONE_NUMBER_ID") and not store.setting("phone_number_id"):
+    if (not app.config.get("TESTING") and os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+            and not store.setting("phone_number_id")):
         store.learn_phone(os.environ["WHATSAPP_PHONE_NUMBER_ID"])
     if app.config["MEDIA_WORKER"] and not app.config.get("TESTING"):
         worker = MediaWorker(store, graph)
@@ -135,7 +156,7 @@ def create_app(config=None):
             if not expected or not hmac.compare_digest(expected, supplied):
                 return jsonify(error="Your security token expired. Refresh the page and try again."), 403
         # Secure cookies on the HTTPS proxy, while keeping local isolated tests possible.
-        app.config["SESSION_COOKIE_SECURE"] = request.is_secure
+        app.config["SESSION_COOKIE_SECURE"] = bool(app.config.get("PRODUCTION") or request.is_secure)
 
     @app.after_request
     def security_headers(response):
@@ -211,9 +232,19 @@ def create_app(config=None):
             access_token_configured=bool(app.config["META_ACCESS_TOKEN"]),
             phone_numbers=store.phones(),
             default_phone_number_id=store.setting("phone_number_id"),
-            webhook_path="/webhook", storage_path="whatsapp_data",
+            webhook_path="/webhook",
+            storage_path=("PostgreSQL + private App Storage"
+                          if app.config["STORAGE_BACKEND"] == "postgres" else "whatsapp_data"),
             last_event_at=store.setting("last_event_at") or None,
         )
+
+    @app.get("/api/archive/messages.txt")
+    @require_staff
+    def readable_archive():
+        text = (store.archive_text() if hasattr(store, "archive_text") else
+                store.log_path.read_text(encoding="utf-8") if store.log_path.exists() else "")
+        return send_file(BytesIO(text.encode("utf-8")), mimetype="text/plain; charset=utf-8",
+                         as_attachment=True, download_name="messages.txt", max_age=0)
 
     @app.get("/api/conversations")
     @require_staff

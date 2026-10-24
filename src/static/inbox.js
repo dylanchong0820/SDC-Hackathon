@@ -96,6 +96,7 @@
         error.status = response.status;
         throw error;
       }
+      window.QuoteAnalytics?.recordResponse(path, options.method || "GET", options.body, data);
       return data;
     } catch (err) {
       if (controller.signal.aborted) {
@@ -1080,6 +1081,9 @@
     pollTimer = window.setInterval(poll, 5000);
   }
   function setMode(mode) {
+    if (state.mode !== mode || !refs.main?.firstChild) {
+      window.QuoteAnalytics?.trackEvent("workspace_tool_opened", { tool: mode });
+    }
     if (mode !== "quotes" && window.QuoteEvaluator &&
         typeof window.QuoteEvaluator.unmount === "function") {
       window.QuoteEvaluator.unmount();
@@ -1300,6 +1304,14 @@
       state.settings = settings;
       state.status = status;
       loading.remove();
+      const archiveCard = node("section", "settings-card");
+      archiveCard.append(node("h3", "", "Message archive"),
+        node("p", "", `Storage: ${status.storage_path}. Download the readable text archive; attachment downloads remain available inside each chat.`));
+      const archiveLink = node("a", "secondary-button", "Download messages.txt");
+      archiveLink.href = "/api/archive/messages.txt";
+      archiveLink.setAttribute("download", "messages.txt");
+      archiveCard.appendChild(archiveLink);
+      page.appendChild(archiveCard);
       const grid = node("div", "settings-grid");
       const formCard = node("form", "settings-card");
       formCard.append(node("h3", "", "Sending number"), node("p", "", "Set the default business phone number ID used for new outbound messages."));
@@ -1471,7 +1483,7 @@
           renderInbox();
           await fetchMessages(true);
         }
-        toast(`Deleted ${result.deleted_messages} messages. ${result.attachments_kept ? "Saved attachment files kept." : `${result.deleted_attachments} attachment files deleted.`}`);
+        toast(`Deleted ${result.deleted_messages} messages. ${result.attachments_kept ? "Saved attachment files kept." : `${result.deleted_attachments} attachment files deleted.`}${result.attachment_deletions_pending ? ` ${result.attachment_deletions_pending} attachment deletions are queued for retry.` : ""}`);
       } catch (err) {
         error.textContent = err.status ? err.message :
           "The deletion result could not be confirmed. Refresh the inbox before retrying. " + err.message;

@@ -63,7 +63,7 @@ def _html_document(reply, items, comparison_count, quote_count, price_reference=
   <style>
     @page {{ size: A4 landscape; margin: 13mm 12mm; }}
     * {{ box-sizing: border-box; }}
-    body {{ margin: 0; color: #1d2927; font: 10px/1.45 Arial, "Noto Sans", sans-serif; }}
+    body {{ margin: 0; color: #1d2927; font: 10px/1.45 Arial, "Noto Sans CJK SC", "Noto Sans", sans-serif; }}
     .brand {{ margin: 0 0 7px; color: #26734a; font-size: 9px; font-weight: 700; letter-spacing: .15em; }}
     h1 {{ margin: 0; color: #193e39; font-size: 22px; letter-spacing: -.04em; }}
     .meta {{ margin: 6px 0 16px; color: #66716f; font-size: 9px; }}
@@ -118,6 +118,22 @@ def build_quote_chat_pdf(reply, items, comparison_count, quote_count, price_refe
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
         }
+        # Nix fonts are exposed through XDG_DATA_DIRS, not necessarily through
+        # /usr/share/fonts. Keep credentials out of the renderer's environment
+        # while explicitly registering the packaged CJK font directories.
+        font_dirs = [Path(value) / "fonts" for value in
+                     os.getenv("XDG_DATA_DIRS", "").split(":") if value]
+        font_dirs = [path for path in font_dirs if path.is_dir()]
+        if font_dirs:
+            font_config = temp / "fonts.conf"
+            font_config.write_text(
+                '<?xml version="1.0"?><fontconfig>'
+                '<include ignore_missing="yes">/etc/fonts/fonts.conf</include>'
+                + "".join(f"<dir>{escape(str(path))}</dir>" for path in font_dirs)
+                + f"<cachedir>{escape(str(temp / 'font-cache'))}</cachedir></fontconfig>",
+                encoding="utf-8",
+            )
+            environment["FONTCONFIG_FILE"] = str(font_config)
         command = [
             chromium,
             "--headless=new",

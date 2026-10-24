@@ -34,3 +34,9 @@ target origin only; leave the internal Replit backup remote alone.
 **Why:** The user explicitly limited repository changes to the owner's fork.
 
 **How to apply:** Check remote ownership before every remote write or branch deletion.
+
+Prepare publishing for real staff/client use, not an evaluation-only demo.
+
+**Why:** When offered a demo with ephemeral storage versus production preparation, the user explicitly chose real client use first.
+
+**How to apply:** Do not declare publishing ready while message/file archives remain ephemeral or the model licence is research-only. Preserve the workspace originals during any durable-storage migration.

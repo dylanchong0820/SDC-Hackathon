@@ -61,23 +61,23 @@ security requirements, tests, and deployment limitations.
 
 | Field                  | Details                                     |
 | ---------------------- | ------------------------------------------- |
-| **Team Name**          | Your Team Name                              |
-| **Team Domain**        | Domain 1 / Domain 2 *(choose one)*          |
-| **SDG Track (1–17)**   | e.g. SDG 11 — Sustainable Cities and Communities |
-| **Team Leader**        | Leader Name                                 |
-| **University**         | University Name(s)                          |
-| **Number of Members**  | e.g. 4                                      |
+| **Team Name**          | Ctrl + Sleep                                |
+| **Team Domain**        |  Domain 2                                   |
+| **SDG Track (1–17)**   | e.g. SDG 8.3Target 8.3 focuses on promoting development-oriented policies that support productive activities, entrepreneurship, innovation, and the growth and formalization of micro-, small-, and medium-sized enterprises (MSMEs) through financial access |
+| **Team Leader**        | Chin Xian Jing                              |
+| **University**         | University of Nottingham Malaysia           |
+| **Number of Members**  | 4                                           |
 
 ## Links
 
 | Resource          | Link                                           |
 | ----------------- | ---------------------------------------------- |
-| GitHub Repository | https://github.com/your-username/your-project  |
-| Replit Project    | https://replit.com/@your-username/your-project |
-| Live Demo         | https://your-project.replit.app                |
-| RunPod Endpoint   | Configured in `RUNPOD_ENDPOINT_URL`            |
-| Slide Deck        | https://example.com/slides                     |
-| Demo Video        | https://example.com/demo-video                 |
+| GitHub Repository |https://github.com/dylanchong0820/SDC-Hackathon.git  |
+| Replit Project    | https://replit.com/@jovilim67/SDC-Hackathon
+| Live Demo         | https://youtu.be/23ucObwWn5o              |
+| RunPod Endpoint   | https://by40gb92whagr1.api.runpod.ai            |
+| Slide Deck        |  https://xmueducn-my.sharepoint.com/:p:/g/personal/fis2508047_xmu_edu_my/IQCMzHE0LrcjSpsaZ5UH_qwCAYv5TYET5Zx-jwpB08kmEp8?e=S9uFwx  |
+| Demo Video        | https://youtu.be/23ucObwWn5o                |
 
 ---
 
@@ -85,11 +85,13 @@ security requirements, tests, and deployment limitations.
 
 ### Problem
 
-Describe the real-world problem you are solving in 2–4 sentences. Who is affected, and why does it matter?
+In emerging markets, over 80% of B2B micro-, small-, and medium-sized enterprises (MSMEs) rely on unstructured WhatsApp communications, forcing procurement officers and business owners to spend up to 15 hours weekly manually rekeying pricing, quantity, and payment terms into spreadsheets. This process suffers from a high administrative error rate and slow response times, leading to miscommunication and lost revenue. Furthermore, without standardized digital records, small merchants remain trapped in informality, making it difficult to access formal supply chain financing or build credit histories to scale their operations.
 
 ### Solution
 
-Explain how your project uses AI to solve the problem and what makes it valuable.
+QuoteBot AI leverages multi-modal Vision-LLMs integrated directly with the Meta WhatsApp Cloud API to parse unstructured incoming data—including text messages, voice notes, photos of handwritten quotes, and multi-page PDFs—into standardized JSON structures. It automatically extracts critical fields like line items, unit prices, supplier details, and payment terms to generate instant chat summaries and downloadable, professional PDF reports within seconds.
+
+The core value lies in its zero-friction, in-chat workflow: non-technical micro- and small-enterprise (MSME) owners do not need to install new software or learn complex ERP systems. By eliminating manual data entry, QuoteBot AI cuts quote processing times by up to 85%, reduces costly pricing errors, and transforms chaotic chat logs into structured, audit-ready digital transaction histories that help small merchants formalize their businesses and access supply chain financing.
 
 ### Key Features
 
@@ -218,33 +220,43 @@ handler; it is not part of the current vLLM-based quotation flow.
 ## Challenges & Learnings
 
 - What challenges did you face, and how did you overcome them?
+Supplier quotations arrive in highly variable formats, including handwritten receipts, multi-page PDFs, low-resolution photos, and colloquial voice/text messages with implicit business terms.
+
+Solution: We implemented multi-modal Vision-LLMs backed by strict JSON Schema constraints (Structured Outputs). This guarantees that extracted data—such as unit prices, quantities, and payment terms—always map into a predictable, schema-validated JSON format regardless of input quality.
+
+
+
 - What did your team learn?
+Design for User Context, Not Just Technical Capability
+Mastering Structured LLM Outputs for Production
+Serverless GPU Orchestration & Cost Control
+
 
 ## Future Improvements
 
-- [ ] Improvement 1
-- [ ] Improvement 2
+- [ ] Autonomous Multi-Quote Negotiation & Vendor Follow-ups
+- [ ] Direct ERP & Accounting Software Sync
 
 ## Team
 
-| Name        | Role                | GitHub                                   |
-| ----------- | ------------------- | ---------------------------------------- |
-| Member Name | Team Lead / Backend | [@username](https://github.com/username) |
-| Member Name | Frontend            | [@username](https://github.com/username) |
-| Member Name | AI / RunPod         | [@username](https://github.com/username) |
-
+| Name           |     Role                              | GitHub                            |
+| -----------    | -------------------            | ---------------------------------------- |
+| Chin Xian Jing       | Team Lead / Slide / demo | [@username](https://github.com/username) |
+| Dylan Chong Jia Ying | Frontend                 | [@username](https://github.com/username) |
+| Zackary Sim Kah Yao  | Slide                    | [@username](https://github.com/username) |
+| Jovi Lim Kai Piin    | AI / RunPod              | [@username](https://github.com/username) |
 ---
 
 ## Submission Checklist
 
-- [ ] Team name, domain (Domain 1 / Domain 2) and SDG track filled in
-- [ ] Slide deck link added
-- [ ] Demo video link added
-- [ ] Replit used, with proof of use in `submission/`
-- [ ] RunPod used, with proof of use in `submission/`
-- [ ] Submission template completed in `submission/`
-- [ ] "How to Run" steps verified
-- [ ] No API keys or secrets committed to the repository
+- [ √] Team name, domain (Domain 1 / Domain 2) and SDG track filled in
+- [ √] Slide deck link added
+- [ √] Demo video link added
+- [ √] Replit used, with proof of use in `submission/`
+- [ √] RunPod used, with proof of use in `submission/`
+- [ √] Submission template completed in `submission/`
+- [ √] "How to Run" steps verified
+- [ √] No API keys or secrets committed to the repository
 
 ## License
 
