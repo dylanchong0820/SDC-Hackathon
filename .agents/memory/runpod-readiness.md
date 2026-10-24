@@ -11,6 +11,12 @@ Treat the RunPod dashboard's endpoint “Ready” label as insufficient evidence
 
 Verify modality support independently of text inference.
 
-**Why:** The existing stock vLLM deployment defaulted to Qwen3-0.6B, which successfully extracted synthetic text quotation facts but is not an image/audio model. An OpenAI-compatible route does not imply multimodal capabilities.
+**Why:** The original stock vLLM deployment defaulted to a text-only model. The user explicitly requires quotation images as well as text; an OpenAI-compatible route alone does not imply those capabilities. Voice is a separate requirement, not implied by image support.
 
 **How to apply:** Never promise image or voice support based only on a successful text test. Require format-specific synthetic checks after any model change, and get approval before enabling always-on GPU workers or changing the paid compute configuration.
+
+Keep an image-capable model for this endpoint rather than reverting to the container's default text model. Qwen/Qwen2.5-VL-3B-Instruct was selected for the existing 24 GB GPU; the user approved 20 GB of container disk for its weights/cache, not an always-on worker or a larger GPU.
+
+**Why:** This preserves the user's requested image support without treating the model-change approval as permission for broader ongoing compute charges.
+
+**How to apply:** Preserve scale-to-zero and existing GPU selection unless separately approved. This vision model does not support audio; retain explicit format errors instead of implying that voice analysis is ready.
