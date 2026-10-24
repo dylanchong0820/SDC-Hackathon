@@ -20,3 +20,9 @@ Keep an image-capable model for this endpoint rather than reverting to the conta
 **Why:** This preserves the user's requested image support without treating the model-change approval as permission for broader ongoing compute charges.
 
 **How to apply:** Preserve scale-to-zero and existing GPU selection unless separately approved. This vision model does not support audio; retain explicit format errors instead of implying that voice analysis is ready.
+
+Do not describe Qwen/Qwen2.5-VL-3B-Instruct as Apache-licensed or suitable for unrestricted commercial use.
+
+**Why:** Its upstream model card and LICENSE were checked directly on 2026-10-25: this particular size uses the Qwen Research License, permitting research/evaluation only and requiring a separate licence for commercial use. The repository's Apache licence does not cover these external model weights.
+
+**How to apply:** Flag this restriction in competition submissions and before commercial deployment. Seek an appropriately licensed replacement or separate permission rather than assuming all models in the Qwen family share a licence. See https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct/blob/main/LICENSE for the authoritative terms.
