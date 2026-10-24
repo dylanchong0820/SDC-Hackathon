@@ -366,6 +366,89 @@ def _pdf_pages_needing_ocr(page_texts):
     return needs_ocr
 
 
+def _pdf_pages_with_large_images(path, page_count, deadline=None):
+    """Find pages with a placed image large enough to plausibly contain quote details."""
+    inspect_page_count = min(page_count, MAX_PDF_PAGES)
+    if inspect_page_count < 1:
+        return [], True
+
+    try:
+        image_result = subprocess.run(
+            ["pdfimages", "-list", "-f", "1", "-l", str(inspect_page_count), str(path)],
+            capture_output=True,
+            timeout=_reading_timeout(5, deadline),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return [], True
+    image_output = image_result.stdout.decode("utf-8", errors="replace")
+    if image_result.returncode != 0 or not re.search(
+        r"^\s*page\s+num\s+type\s+width\s+height\b", image_output, re.MULTILINE | re.IGNORECASE
+    ):
+        return [], True
+
+    image_rows = []
+    for line in image_output.splitlines():
+        fields = line.split()
+        if len(fields) < 3 or fields[2].casefold() != "image":
+            continue
+        if len(fields) < 14:
+            return [], True
+        try:
+            page_number = int(fields[0])
+            width, height = int(fields[3]), int(fields[4])
+            x_ppi, y_ppi = float(fields[12]), float(fields[13])
+        except (ValueError, IndexError):
+            return [], True
+        if 1 <= page_number <= inspect_page_count:
+            if width > 0 and height > 0 and x_ppi > 0 and y_ppi > 0:
+                image_rows.append((page_number, width, height, x_ppi, y_ppi))
+            else:
+                return [], True
+    if not image_rows:
+        return [], False
+
+    first_page, last_page = min(row[0] for row in image_rows), max(row[0] for row in image_rows)
+    try:
+        page_result = subprocess.run(
+            ["pdfinfo", "-f", str(first_page), "-l", str(last_page), "-box", str(path)],
+            capture_output=True,
+            timeout=_reading_timeout(5, deadline),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return [], True
+    page_output = page_result.stdout.decode("utf-8", errors="replace")
+    if page_result.returncode != 0:
+        return [], True
+    page_sizes = {
+        int(match.group(1)): (float(match.group(2)), float(match.group(3)))
+        for match in re.finditer(
+            r"^Page\s+(\d+)\s+size:\s+([\d.]+)\s+x\s+([\d.]+)\s+pts\b",
+            page_output,
+            re.MULTILINE | re.IGNORECASE,
+        )
+    }
+
+    image_pages = set()
+    for page_number, width, height, x_ppi, y_ppi in image_rows:
+        page_size = page_sizes.get(page_number)
+        if not page_size or min(page_size) <= 0:
+            return [], True
+        page_width, page_height = page_size
+        width_fraction = (width / x_ppi * 72) / page_width
+        height_fraction = (height / y_ppi * 72) / page_height
+        # Small marks and thin banners are usually decorative; substantial regions
+        # are more likely to be a price table, product list, or other quote detail.
+        if (
+            width_fraction >= 0.28
+            and height_fraction >= 0.16
+            and width_fraction * height_fraction >= 0.05
+        ):
+            image_pages.add(page_number)
+    return sorted(image_pages), False
+
+
 def _page_list_label(page_numbers):
     pages = sorted(set(page_numbers))
     if not pages:
@@ -486,6 +569,10 @@ def _document_text(path, mime_type, deadline=None, metadata=None):
             candidate_pages = list(range(1, min(detected_page_count, MAX_OCR_PAGES) + 1))
         else:
             candidate_pages = _pdf_pages_needing_ocr(page_texts)
+        sparse_pages = set(candidate_pages)
+        image_pages, image_check_unverified = _pdf_pages_with_large_images(
+            path, inspect_page_count, deadline)
+        candidate_pages = sorted(set(candidate_pages).union(image_pages))
         eligible_pages = [page for page in candidate_pages if page <= MAX_OCR_PAGES]
         omitted_pages = [page for page in candidate_pages if page > MAX_OCR_PAGES]
         warnings = []
@@ -500,32 +587,50 @@ def _document_text(path, mime_type, deadline=None, metadata=None):
             except QuoteAnalysisError:
                 failed_pages = eligible_pages
             if failed_pages:
+                failed_image_pages = sorted(set(failed_pages).intersection(image_pages))
+                image_context = (
+                    ", including the detected image region, on "
+                    if failed_image_pages else " on "
+                )
                 warnings.append(
-                    f"Local OCR could not verify readable quotation text on "
+                    f"Local OCR could not verify readable quotation text{image_context}"
                     f"{_page_list_label(failed_pages)}. "
                     "Check the original attachment before choosing a quotation."
                 )
 
-        if omitted_pages:
+        omitted_image_pages = sorted(set(omitted_pages).intersection(image_pages))
+        omitted_sparse_pages = sorted(set(omitted_pages).intersection(sparse_pages))
+        if omitted_sparse_pages:
             warnings.append(
-                f"Page text is missing or too sparse on {_page_list_label(omitted_pages)}. Local OCR is "
+                f"Page text is missing or too sparse on {_page_list_label(omitted_sparse_pages)}. Local OCR is "
                 f"limited to the first {MAX_OCR_PAGES} PDF pages, so those pages are omitted; "
                 "check the original attachment."
+            )
+        if omitted_image_pages:
+            warnings.append(
+                f"A sizeable image region on {_page_list_label(omitted_image_pages)} could contain "
+                f"quotation details, but local OCR is limited to the first {MAX_OCR_PAGES} PDF pages; "
+                "check those pages in the original attachment."
             )
         if coverage_unverified:
             warnings.append(
                 f"Page breaks could not be verified. Local OCR checks at most the first "
                 f"{MAX_OCR_PAGES} PDF pages; check the original attachment for missing content."
             )
-        if candidate_pages and page_count and page_count > MAX_PDF_PAGES:
+        if image_check_unverified:
             warnings.append(
-                f"This PDF has {page_count} pages, but local page checks cover only the first "
-                f"{MAX_PDF_PAGES}. Check pages {MAX_PDF_PAGES + 1}–{page_count} in the original."
+                f"Image regions could not be checked on the first {inspect_page_count} PDF pages. "
+                "Image-only quotation details may be missing; check the original attachment."
+            )
+        if page_count and page_count > MAX_PDF_PAGES:
+            warnings.append(
+                f"This PDF has {page_count} pages, but local text and image-region checks cover only "
+                f"the first {MAX_PDF_PAGES}. Check pages {MAX_PDF_PAGES + 1}–{page_count} in the original."
             )
 
         metadata["ocr_truncated"] = bool(
             omitted_pages or failed_pages or coverage_unverified
-            or (candidate_pages and page_count and page_count > MAX_PDF_PAGES)
+            or image_check_unverified or (page_count and page_count > MAX_PDF_PAGES)
         )
         metadata["source_warnings"] = warnings
         warning_text = (

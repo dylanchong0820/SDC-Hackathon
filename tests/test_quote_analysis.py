@@ -123,6 +123,69 @@ class QuoteAnalysisTests(unittest.TestCase):
             finally:
                 browser.close()
 
+    def _make_hybrid_image_table_pdf(self, pdf, decorative=False, page_count=1, image_page=1):
+        from playwright.sync_api import sync_playwright
+
+        chromium = (
+            os.getenv("CHROMIUM_PATH")
+            or shutil.which("chromium")
+            or ("/repl/tools/bin/chromium" if Path("/repl/tools/bin/chromium").exists() else None)
+        )
+        self.assertIsNotNone(chromium, "Chromium is needed to build the image-table fixture.")
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=chromium,
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            try:
+                page = browser.new_page(viewport={"width": 1200, "height": 900})
+                if decorative:
+                    page.set_content(
+                        '<div id="art" style="width:170px;height:55px;background:#164e63;'
+                        'color:white;font:bold 30px Arial;text-align:center;line-height:55px">'
+                        "NORTHWIND</div>"
+                    )
+                    image_selector = "#art"
+                else:
+                    page.set_content(
+                        '<div id="art" style="box-sizing:border-box;width:700px;height:270px;'
+                        'padding:24px;background:#fff;border:4px solid #111;font:40px Arial">'
+                        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:28px">'
+                        "<b>Item</b><b>Price</b><span>Control Panel</span><strong>MYR 128</strong>"
+                        "<span>Installation</span><strong>MYR 35</strong></div></div>"
+                    )
+                    image_selector = "#art"
+                image = base64.b64encode(
+                    page.locator(image_selector).screenshot(type="png")
+                ).decode("ascii")
+                pages = []
+                for index in range(1, page_count + 1):
+                    image_markup = (
+                        f'<img class="quote-image" src="data:image/png;base64,{image}">'
+                        if index == image_page else ""
+                    )
+                    pages.append(
+                        '<section class="page"><div class="details">'
+                        f"<div>Supplier: Northwind Tools quotation Q-300{index}.</div>"
+                        "<div>Delivery is included within six calendar days, with service support.</div>"
+                        f"<div>Commercial details for section {index} include warranty, installation "
+                        "coordination, payment milestones, and product support requirements.</div>"
+                        f"</div>{image_markup}</section>"
+                    )
+                page.set_content(
+                    "<!doctype html><style>@page{size:A4;margin:0}"
+                    "html,body{margin:0}body{font:24px Arial;line-height:1.5}"
+                    ".page{box-sizing:border-box;"
+                    "width:210mm;height:297mm;padding:35px;overflow:hidden}"
+                    ".page+.page{break-before:page}.details{margin-bottom:28px}"
+                    ".quote-image{display:block}</style>" + "".join(pages),
+                    wait_until="load",
+                )
+                page.pdf(path=str(pdf), print_background=True)
+            finally:
+                browser.close()
+
     def test_quote_rankings_are_deterministic_and_currency_safe(self):
         quotes = [
             {"message_id": "z-expensive", "currency": "MYR", "total_price": 150,
@@ -389,6 +452,102 @@ class QuoteAnalysisTests(unittest.TestCase):
         self.assertIn("[OCR page 2]", text)
         self.assertFalse(metadata["source_warnings"])
 
+    def test_hybrid_pdf_ocr_reads_image_price_table_beside_searchable_quote_text(self):
+        pdf = Path(self.directory.name) / "image-price-table.pdf"
+        self._make_hybrid_image_table_pdf(pdf)
+
+        metadata = {}
+        text = _document_text(pdf, "application/pdf", metadata=metadata)
+        self.assertEqual(metadata["pdf_page_count"], 1)
+        self.assertIn("Supplier: Northwind Tools", text)
+        self.assertIn("Delivery is included within six calendar days", text)
+        self.assertIn("MYR 128", text)
+        self.assertIn("[OCR page 1]", text)
+        self.assertFalse(metadata["source_warnings"])
+
+    def test_decorative_logo_does_not_trigger_pdf_ocr_or_a_coverage_warning(self):
+        pdf = Path(self.directory.name) / "decorative-logo.pdf"
+        self._make_hybrid_image_table_pdf(pdf, decorative=True)
+
+        metadata = {}
+        real_run = subprocess.run
+        commands = []
+
+        def track_commands(args, **kwargs):
+            commands.append(args[0])
+            return real_run(args, **kwargs)
+
+        with patch("src.quote_analysis.subprocess.run", side_effect=track_commands):
+            text = _document_text(pdf, "application/pdf", metadata=metadata)
+        self.assertIn("Supplier: Northwind Tools", text)
+        self.assertFalse(metadata["source_warnings"])
+        self.assertNotIn("tesseract", commands)
+
+    def test_image_price_table_after_page_five_is_disclosed_without_ocr(self):
+        pdf = Path(self.directory.name) / "image-price-table-page-six.pdf"
+        self._make_hybrid_image_table_pdf(pdf, page_count=6, image_page=6)
+        real_run = subprocess.run
+        commands = []
+
+        def track_commands(args, **kwargs):
+            commands.append(args[0])
+            return real_run(args, **kwargs)
+
+        metadata = {}
+        with patch("src.quote_analysis.subprocess.run", side_effect=track_commands):
+            text = _document_text(pdf, "application/pdf", metadata=metadata)
+        self.assertEqual(metadata["pdf_page_count"], 6)
+        self.assertTrue(metadata["ocr_truncated"])
+        self.assertTrue(any(
+            "sizeable image region on page 6" in warning
+            and "first 5 PDF pages" in warning
+            for warning in metadata["source_warnings"]
+        ))
+        self.assertIn("Supplier: Northwind Tools quotation Q-3006", text)
+        self.assertNotIn("[OCR page 6]", text)
+        self.assertNotIn("MYR 128", text)
+        self.assertNotIn("tesseract", commands)
+
+    def test_image_table_ocr_failure_is_disclosed_in_review_and_saved_result(self):
+        self.login()
+        self.add_message("image-table-failure", kind="document", filename="image-table.pdf",
+                         mime_type="application/pdf")
+        path = self.store.attachments / "image-table.pdf"
+        self._make_hybrid_image_table_pdf(path)
+        original = path.read_bytes()
+        self.store.media_saved(self.store.message("image-table-failure"), path,
+                               "application/pdf", "image-table.pdf")
+        real_run = subprocess.run
+
+        def fail_only_ocr(args, **kwargs):
+            if args[0] == "tesseract":
+                return SimpleNamespace(returncode=1, stdout=b"", stderr=b"isolated OCR failure")
+            return real_run(args, **kwargs)
+
+        with patch("src.quote_analysis.subprocess.run", side_effect=fail_only_ocr):
+            review = self.post("/api/quote-previews", {"message_ids": ["image-table-failure"]})
+            self.assertEqual(review.status_code, 200)
+            source = review.json["sources"][0]
+            self.assertIn("including the detected image region", source["source_warnings"][0])
+            self.assertIn("Supplier: Northwind Tools", source["text"])
+            self.assertIn("Source coverage warning", source["text"])
+            started = self.post("/api/quote-evaluations", {
+                "message_ids": ["image-table-failure"], "priority": "price",
+                "review_token": review.json["review_token"]})
+            self.assertEqual(started.status_code, 202)
+            worker = QuoteAnalysisWorker(
+                self.store, "https://example.api.runpod.ai", "test-key")
+            with patch.object(worker, "_request_model", return_value={"quotes": [{
+                "quote_key": "QUOTE_1", "currency": "MYR", "total_price": 128,
+                "source_warnings": [],
+            }]}) as model:
+                worker._analyze(started.json["evaluation"]["id"])
+        self.assertIn("Source coverage warning", str(model.call_args.args[0]))
+        saved = self.store.quote_evaluation(started.json["evaluation"]["id"])["result"]["quotes"][0]
+        self.assertEqual(saved["source_warnings"], source["source_warnings"])
+        self.assertTrue(saved["ocr_truncated"])
+        self.assertEqual(path.read_bytes(), original)
+
     def test_hybrid_pdf_ocr_failure_is_disclosed_in_review_and_saved_result(self):
         self.login()
         self.add_message("hybrid-partial", kind="document", filename="hybrid.pdf",
@@ -603,6 +762,7 @@ class QuoteAnalysisTests(unittest.TestCase):
         for count in (5, 6, None):
             metadata = {}
             with patch("src.quote_analysis._pdf_page_count", return_value=count), \
+                 patch("src.quote_analysis._pdf_pages_with_large_images", return_value=([], False)), \
                  patch("src.quote_analysis.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=b"")), \
                  patch("src.quote_analysis._ocr_pdf", return_value="MYR 128"):
                 _document_text(pdf, "application/pdf", metadata=metadata)
@@ -615,6 +775,7 @@ class QuoteAnalysisTests(unittest.TestCase):
             for index in range(1, 9)
         ) + "\f"
         with patch("src.quote_analysis._pdf_page_count", return_value=8), \
+             patch("src.quote_analysis._pdf_pages_with_large_images", return_value=([], False)), \
              patch("src.quote_analysis.subprocess.run", return_value=SimpleNamespace(
                  returncode=0, stdout=searchable.encode("utf-8"))):
             self.assertIn(searchable, _document_text(pdf, "application/pdf", metadata=metadata))
@@ -778,6 +939,7 @@ class QuoteAnalysisTests(unittest.TestCase):
         pdf = root / "quotation.pdf"
         pdf.write_bytes(b"mock PDF handled by the local pdftotext utility")
         with patch("src.quote_analysis._pdf_page_count", return_value=1), \
+             patch("src.quote_analysis._pdf_pages_with_large_images", return_value=([], False)), \
              patch("src.quote_analysis.subprocess.run", return_value=SimpleNamespace(
                  returncode=0, stdout=(
                      b"Northwind Tools quotation includes MYR 88 and delivery in 2 calendar days. "
