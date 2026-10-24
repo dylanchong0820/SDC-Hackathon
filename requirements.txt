@@ -6,3 +6,10 @@ requests==2.34.2
 gunicorn==26.2.0
 psycopg[binary]==3.3.6
 replit-object-storage==1.0.2
+
+# Pin security-sensitive transitive dependencies for builds and post-merge installs.
+# certifi removes compromised CA trust; httpx2/httpcore2 fix transport,
+# response decompression, SSE, multipart headers, and request framing issues.
+certifi==2026.10.23
+httpx2==2.16.0
+httpcore2==2.16.0

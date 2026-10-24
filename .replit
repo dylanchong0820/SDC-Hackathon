@@ -2,7 +2,7 @@ modules = ["python-3.11", "nodejs-24", "postgresql-16"]
 
 [nix]
 channel = "stable-25_05"
-packages = ["freetype", "gitFull", "glibcLocales", "gnumeric", "playwright-driver", "postgresql", "tesseract", "poppler", "antiword", "chromium", "noto-fonts-cjk-sans"]
+packages = ["antiword", "cacert", "chromium", "freetype", "gitFull", "glibcLocales", "gnumeric", "noto-fonts-cjk-sans", "playwright-driver", "poppler", "postgresql", "tesseract"]
 
 [workflows]
 runButton = "Project"
