@@ -53,13 +53,19 @@ ownership/recovery. RunPod may independently retain its scale-to-zero policy.
 
 Build: `bash scripts/build-production.sh`
 
-Run: `python scripts/start-production.py`
+Run: `python -I -S scripts/start-production.py`
 
-The launcher imports Gunicorn from the same dependency target used by the build,
-so publishing does not depend on a development-only `gunicorn` console script
-being present in `PATH`. It preserves the Gunicorn configuration and production
-application factory. Use `python scripts/start-production.py --version` for a
-dependency/launcher check that does not start the application.
+The build creates `.production-deps/` inside the project and the launcher imports
+from that exact project-relative folder. It is excluded from Git, but deliberately
+not excluded from publishing. Do not move production dependencies back into
+`.pythonlibs/`, a user-site directory or another publish-excluded path.
+
+The build checks imports and the Gunicorn launcher with isolated Python (`-I -S`),
+without workspace packages, user-site discovery or `PYTHONPATH`. It preserves the
+Gunicorn configuration and production application factory. Use
+`python -I -S scripts/start-production.py --version` for a dependency/launcher
+check that does not start the application. Builds never connect to databases,
+initialize storage, run migrations or start AI jobs.
 
 The production factory refuses local-only storage, incomplete credentials and
 missing bucket access. Configure the project's secrets in Publishing:

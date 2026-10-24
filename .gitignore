@@ -7,3 +7,4 @@ __pycache__/
 .config/
 .DS_Store
 /generated-artifacts/
+/.production-deps/

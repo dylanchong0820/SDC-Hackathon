@@ -3,3 +3,4 @@ whatsapp_data/
 .pythonlibs/
 __pycache__/
 generated-artifacts/
+# Do not exclude .production-deps/: build-generated runtime dependencies must ship.

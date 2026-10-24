@@ -25,7 +25,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "exec python scripts/start-production.py"
+args = "exec python -I -S scripts/start-production.py"
 waitForPort = 5000
 
 [[ports]]
@@ -47,6 +47,6 @@ WHATSAPP_PHONE_NUMBER_ID = "1441593582361913"
 
 [deployment]
 deploymentTarget = "vm"
-run = ["python", "scripts/start-production.py"]
+run = ["python", "-I", "-S", "scripts/start-production.py"]
 build = ["bash", "scripts/build-production.sh"]
 ignorePorts = false

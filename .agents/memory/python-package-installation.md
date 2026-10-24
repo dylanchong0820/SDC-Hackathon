@@ -19,3 +19,16 @@ exposing its console launcher on `PATH`. Workspace-only launchers hid the issue.
 **How to apply:** Validate publishing launchers with a restricted executable
 search path and disabled automatic user-site discovery. Keep dependency import
 paths consistent with the build target instead of relying on workspace tooling.
+
+Production dependencies must use a project-relative build directory that is
+included in the published artifact, not the development user-site location.
+
+**Why:** After removing the console-script dependency, a published runtime still
+could not import the server package even though an isolated check against the
+workspace's user-site target passed. Host-specific user-site discovery did not
+establish that the same package location was available in the published image.
+
+**How to apply:** Treat development package synchronization and production
+packaging as separate concerns. Test production imports after relocating the
+application, with workspace/user-site packages inaccessible, and ensure publish
+ignore rules do not remove the generated runtime bundle.
