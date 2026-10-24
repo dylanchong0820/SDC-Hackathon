@@ -217,6 +217,38 @@ def run():
                     for label in ("Home", "Compare quotes", "Quote register", "AI chat",
                                   "Setup checklist", "Settings", "Sign out"):
                         expect(navigation_bar.get_by_text(label, exact=True)).to_be_visible()
+                    settings_button = navigation_bar.get_by_role(
+                        "button", name="Settings", exact=True)
+                    settings_button.hover()
+                    page.wait_for_function("""() => {
+                      const button = document.querySelector(
+                        '.topbar-right .icon-button[data-mode="settings"]');
+                      return button &&
+                        getComputedStyle(button, "::after").opacity === "1";
+                    }""")
+                    tooltip = settings_button.evaluate("""el => {
+                      const style = getComputedStyle(el, "::after");
+                      const box = el.getBoundingClientRect();
+                      const left = box.left + parseFloat(style.left);
+                      return {
+                        content: style.content,
+                        visible: style.visibility === "visible" && Number(style.opacity) > 0.99,
+                        left,
+                        right: left + parseFloat(style.width),
+                        top: box.bottom + parseFloat(style.top),
+                        bottom: box.bottom + parseFloat(style.top) + parseFloat(style.height),
+                        viewportWidth: innerWidth
+                      };
+                    }""")
+                    assert tooltip["content"] == '"Settings"'
+                    assert tooltip["visible"], "The Settings destination tooltip should appear on hover."
+                    assert tooltip["left"] >= 0 and tooltip["right"] <= tooltip["viewportWidth"] + 1, \
+                        "The Settings tooltip should stay within the viewport."
+                    assert tooltip["top"] >= 0 and tooltip["bottom"] <= viewport["height"], \
+                        "The Settings tooltip should not be clipped vertically."
+                    if viewport["width"] == 390:
+                        page.screenshot(path=str(outputs / "nav-tooltip.png"), full_page=True,
+                                        animations="disabled")
                     page.locator(".topbar").screenshot(path=str(outputs / f"header-{viewport['width']}.png"))
                     for navigation, selector in (
                         ("Workspace home", ".wh-root"),

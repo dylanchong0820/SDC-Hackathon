@@ -32,6 +32,9 @@ audio, TXT/Markdown/CSV/RTF, DOC/DOCX, XLS/XLSX, and PDFs. Scanned PDFs are OCRe
 locally in English, Malay, and Simplified/Traditional Chinese, using at most the
 first five pages and a 90-second OCR limit. Legacy XLS files are converted in a
 temporary directory before reading; the original WhatsApp attachment is unchanged.
+For partly searchable PDFs, pages with little or no native text are OCRed when
+they fall within that same five-page limit. Pages that cannot be OCRed are called
+out in source review and saved comparisons so staff can check the original file.
 Processing limits are 5 MB per image/audio file, 9 MB combined image/audio data,
 and 20 MB per document. Scans longer than five pages show their total page count
 and omitted page range beside the reviewed source and in the saved comparison.

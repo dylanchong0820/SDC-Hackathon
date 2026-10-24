@@ -298,7 +298,8 @@
     ].forEach(([mode, accessibleLabel, label, glyph, description]) => {
       const item = button(accessibleLabel, "icon-button", glyph, () => setMode(mode));
       item.appendChild(node("span", "nav-label", label));
-      item.title = description;
+      item.dataset.tooltip = accessibleLabel;
+      item.setAttribute("aria-description", description);
       item.dataset.mode = mode;
       right.appendChild(item);
     });

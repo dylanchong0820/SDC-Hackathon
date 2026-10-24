@@ -84,6 +84,44 @@ class QuoteAnalysisTests(unittest.TestCase):
         self.assertTrue(self.store.insert_inbound(self.conversation["id"], record))
         return self.store.message(message_id)
 
+    def _make_hybrid_pdf(self, pdf, pages):
+        from playwright.sync_api import sync_playwright
+
+        chromium = (
+            os.getenv("CHROMIUM_PATH")
+            or shutil.which("chromium")
+            or ("/repl/tools/bin/chromium" if Path("/repl/tools/bin/chromium").exists() else None)
+        )
+        self.assertIsNotNone(chromium, "Chromium is needed to build the hybrid-PDF fixture.")
+        fixture = Path(__file__).parent / "fixtures" / "scanned-quotation.html"
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                executable_path=chromium,
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            try:
+                page = browser.new_page(viewport={"width": 1500, "height": 1000})
+                page.goto(fixture.resolve().as_uri(), wait_until="load")
+                scan_png = base64.b64encode(page.screenshot(type="png")).decode("ascii")
+                body = []
+                for index, content in enumerate(pages):
+                    if content is None:
+                        content = f'<img alt="" src="data:image/png;base64,{scan_png}">'
+                    body.append(
+                        f'<section class="page{" next" if index else ""}">{content}</section>'
+                    )
+                page.set_content(
+                    "<!doctype html><style>@page{size:A4;margin:0}"
+                    "html,body{margin:0}.page{box-sizing:border-box;width:210mm;height:297mm;"
+                    "padding:24mm;font:22px Arial;overflow:hidden}.next{break-before:page}"
+                    "img{display:block;width:700px;height:auto}</style>" + "".join(body),
+                    wait_until="load",
+                )
+                page.pdf(path=str(pdf), print_background=True)
+            finally:
+                browser.close()
+
     def test_quote_rankings_are_deterministic_and_currency_safe(self):
         quotes = [
             {"message_id": "z-expensive", "currency": "MYR", "total_price": 150,
@@ -254,6 +292,99 @@ class QuoteAnalysisTests(unittest.TestCase):
                 worker._analyze(started.json["evaluation"]["id"])
         model.assert_not_called()
 
+    def test_hybrid_pdf_ocr_reads_an_image_only_pricing_page(self):
+        pdf = Path(self.directory.name) / "hybrid-quotation.pdf"
+        self._make_hybrid_pdf(pdf, [
+            "SEARCHABLE COVER: Northwind Tools quotation number Q-3001. Please see the "
+            "following pages for product and delivery details.",
+            None,
+            "SEARCHABLE FOOTER: Northwind Tools confirms this quotation is valid for "
+            "thirty days and delivery terms are subject to availability.",
+        ])
+
+        metadata = {}
+        text = _document_text(pdf, "application/pdf", metadata=metadata)
+        self.assertEqual(metadata["pdf_page_count"], 3)
+        self.assertIn("SEARCHABLE COVER", text)
+        self.assertIn("Northwind Tools", text)
+        self.assertIn("MYR 128", text)
+        self.assertIn("[OCR page 2]", text)
+        self.assertFalse(metadata["source_warnings"])
+
+    def test_hybrid_pdf_ocr_failure_is_disclosed_in_review_and_saved_result(self):
+        self.login()
+        self.add_message("hybrid-partial", kind="document", filename="hybrid.pdf",
+                         mime_type="application/pdf")
+        path = self.store.attachments / "hybrid.pdf"
+        self._make_hybrid_pdf(path, [
+            "SEARCHABLE COVER: Northwind Tools quotation number Q-3002. Please see the "
+            "following pages for product and delivery details.",
+            None,
+            "SEARCHABLE FOOTER: This searchable page contains warranty and delivery "
+            "terms but no pricing details.",
+        ])
+        original = path.read_bytes()
+        self.store.media_saved(self.store.message("hybrid-partial"), path,
+                               "application/pdf", "hybrid.pdf")
+        real_run = subprocess.run
+
+        def fail_only_ocr(args, **kwargs):
+            if args[0] == "tesseract":
+                return SimpleNamespace(returncode=1, stdout=b"", stderr=b"isolated OCR failure")
+            return real_run(args, **kwargs)
+
+        with patch("src.quote_analysis.subprocess.run", side_effect=fail_only_ocr):
+            review = self.post("/api/quote-previews", {"message_ids": ["hybrid-partial"]})
+            self.assertEqual(review.status_code, 200)
+            source = review.json["sources"][0]
+            self.assertIn("page 2", source["source_warnings"][0])
+            self.assertIn("SEARCHABLE COVER", source["text"])
+            self.assertIn("Source coverage warning", source["text"])
+            started = self.post("/api/quote-evaluations", {
+                "message_ids": ["hybrid-partial"], "priority": "price",
+                "review_token": review.json["review_token"]})
+            self.assertEqual(started.status_code, 202)
+            worker = QuoteAnalysisWorker(
+                self.store, "https://example.api.runpod.ai", "test-key")
+            with patch.object(worker, "_request_model", return_value={"quotes": [{
+                "quote_key": "QUOTE_1", "currency": "MYR", "total_price": 128,
+                "source_warnings": [],
+            }]}) as model:
+                worker._analyze(started.json["evaluation"]["id"])
+        payload = str(model.call_args.args[0])
+        saved = self.store.quote_evaluation(started.json["evaluation"]["id"])["result"]["quotes"][0]
+        self.assertEqual(saved["source_warnings"], source["source_warnings"])
+        self.assertTrue(saved["ocr_truncated"])
+        self.assertIn("SEARCHABLE COVER", payload)
+        self.assertIn("Source coverage warning", payload)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_hybrid_scanned_pricing_after_page_five_is_omitted_and_warned(self):
+        pdf = Path(self.directory.name) / "hybrid-page-six.pdf"
+        searchable_pages = [
+            f"Searchable quotation page {index}: Supplier Northwind section {index} "
+            f"contains terms, warranty details, and information about delivery."
+            for index in range(1, 6)
+        ]
+        self._make_hybrid_pdf(pdf, searchable_pages + [None])
+        commands = []
+        real_run = subprocess.run
+
+        def track_ocr(args, **kwargs):
+            if args[0] == "tesseract":
+                commands.append(args)
+            return real_run(args, **kwargs)
+
+        metadata = {}
+        with patch("src.quote_analysis.subprocess.run", side_effect=track_ocr):
+            text = _document_text(pdf, "application/pdf", metadata=metadata)
+        self.assertEqual(metadata["pdf_page_count"], 6)
+        self.assertTrue(metadata["ocr_truncated"])
+        self.assertIn("page 6", metadata["source_warnings"][0])
+        self.assertIn("first 5 PDF pages", metadata["source_warnings"][0])
+        self.assertFalse(commands, "Pages after the five-page OCR boundary must not be OCRed.")
+        self.assertNotIn("MYR 128", text)
+
     def test_scanned_pdf_fixture_is_ocrd_locally(self):
         from playwright.sync_api import sync_playwright
 
@@ -398,9 +529,15 @@ class QuoteAnalysisTests(unittest.TestCase):
             self.assertEqual(bool(metadata["source_warnings"]), count != 5)
             self.assertEqual(metadata["ocr_truncated"], None if count is None else count > 5)
         metadata = {}
+        searchable = "\f".join(
+            f"Searchable page {index} has enough distinct native quotation text for "
+            f"products, prices, delivery terms, and service details number {index}."
+            for index in range(1, 9)
+        ) + "\f"
         with patch("src.quote_analysis._pdf_page_count", return_value=8), \
-             patch("src.quote_analysis.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=b"Full searchable text")):
-            self.assertEqual(_document_text(pdf, "application/pdf", metadata=metadata), "Full searchable text")
+             patch("src.quote_analysis.subprocess.run", return_value=SimpleNamespace(
+                 returncode=0, stdout=searchable.encode("utf-8"))):
+            self.assertIn(searchable, _document_text(pdf, "application/pdf", metadata=metadata))
         self.assertEqual(metadata["pdf_page_count"], 8)
         self.assertFalse(metadata.get("source_warnings"))
     def test_scanned_pdf_renderer_timeout_is_a_clear_per_file_error(self):
@@ -559,8 +696,12 @@ class QuoteAnalysisTests(unittest.TestCase):
 
         pdf = root / "quotation.pdf"
         pdf.write_bytes(b"mock PDF handled by the local pdftotext utility")
-        with patch("src.quote_analysis.subprocess.run", return_value=SimpleNamespace(
-                returncode=0, stdout=b"MYR 88, delivery in 2 calendar days")) as run:
+        with patch("src.quote_analysis._pdf_page_count", return_value=1), \
+             patch("src.quote_analysis.subprocess.run", return_value=SimpleNamespace(
+                 returncode=0, stdout=(
+                     b"Northwind Tools quotation includes MYR 88 and delivery in 2 calendar days. "
+                     b"Please review the written payment and warranty conditions before ordering."
+                 ))) as run:
             self.assertIn("MYR 88", _document_text(pdf, "application/pdf"))
             self.assertEqual(run.call_args.args[0][0], "pdftotext")
 

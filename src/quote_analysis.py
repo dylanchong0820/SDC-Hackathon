@@ -34,6 +34,7 @@ MAX_EXTRACTED_CHARS = 12_000
 MAX_TOTAL_TEXT_CHARS = 36_000
 MAX_PDF_PAGES = 40
 MAX_OCR_PAGES = 5
+MIN_PDF_PAGE_TEXT_CHARS = 48
 MAX_OCR_SECONDS = 90
 MAX_OCR_RENDER_SECONDS = 25
 MAX_OCR_PAGE_SECONDS = 15
@@ -206,17 +207,24 @@ def _xls_text(path, deadline=None):
         return _xlsx_text(converted)
 
 
-def _ocr_pdf(path, deadline=None):
+def _ocr_pdf(path, deadline=None, page_numbers=None, return_failures=False):
     deadline = min(deadline or float("inf"), time.monotonic() + MAX_OCR_SECONDS)
+    selected_pages = range(1, MAX_OCR_PAGES + 1) if page_numbers is None else page_numbers
+    requested_pages = sorted(set(selected_pages))
+    if any(page < 1 or page > MAX_OCR_PAGES for page in requested_pages):
+        raise ValueError(f"PDF OCR is limited to the first {MAX_OCR_PAGES} pages.")
+    if not requested_pages:
+        return ("", []) if return_failures else ""
     with tempfile.TemporaryDirectory(prefix="quote-pdf-ocr-") as temporary_directory:
         prefix = Path(temporary_directory) / "page"
+        first_page, last_page = requested_pages[0], requested_pages[-1]
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise subprocess.TimeoutExpired("pdftoppm", MAX_OCR_RENDER_SECONDS)
             rendered = subprocess.run(
                 [
-                    "pdftoppm", "-f", "1", "-l", str(MAX_OCR_PAGES),
+                    "pdftoppm", "-f", str(first_page), "-l", str(last_page),
                     "-scale-to", "1600", "-jpeg", "-jpegopt", "quality=75",
                     str(path), str(prefix),
                 ],
@@ -235,11 +243,15 @@ def _ocr_pdf(path, deadline=None):
         if rendered.returncode != 0:
             raise QuoteAnalysisError("Could not render this scanned PDF for OCR.")
 
-        pages = sorted(Path(temporary_directory).glob("page-*.jpg"))[:MAX_OCR_PAGES]
-        if not pages:
+        rendered_pages = {}
+        for page in Path(temporary_directory).glob("page-*.jpg"):
+            match = re.search(r"-(\d+)\.jpg$", page.name)
+            if match:
+                rendered_pages[int(match.group(1))] = page
+        if not rendered_pages:
             raise QuoteAnalysisError("Could not render any pages from this scanned PDF.")
         total_image_bytes = 0
-        for page in pages:
+        for page in rendered_pages.values():
             try:
                 page_bytes = page.stat().st_size
             except OSError:
@@ -248,10 +260,19 @@ def _ocr_pdf(path, deadline=None):
             if page_bytes > MAX_OCR_IMAGE_BYTES or total_image_bytes > MAX_OCR_IMAGE_BYTES * MAX_OCR_PAGES:
                 raise QuoteAnalysisError("This scanned PDF exceeds the local OCR image-size limit.")
 
+        pages = [(number, rendered_pages[number]) for number in requested_pages
+                 if number in rendered_pages]
+        if not pages:
+            raise QuoteAnalysisError("Could not render the requested scanned PDF page.")
         extracted_pages = []
-        for page in pages:
+        failed_pages = [number for number in requested_pages if number not in rendered_pages]
+        for number, page in pages:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                if return_failures:
+                    failed_pages.extend(page_number for page_number, _ in pages
+                                        if page_number >= number and page_number not in failed_pages)
+                    break
                 raise QuoteAnalysisError(
                     "OCR exceeded the 90-second limit. Try a shorter PDF or a searchable copy."
                 )
@@ -266,29 +287,90 @@ def _ocr_pdf(path, deadline=None):
                     check=False,
                 )
             except subprocess.TimeoutExpired:
+                if return_failures:
+                    failed_pages.append(number)
+                    continue
                 raise QuoteAnalysisError(
                     "OCR exceeded the 90-second limit. Try a shorter PDF or a searchable copy."
                 ) from None
             except OSError:
+                if return_failures:
+                    failed_pages.append(number)
+                    continue
                 raise QuoteAnalysisError(
                     "Scanned-PDF OCR is unavailable in this runtime. Use a searchable PDF or contact an administrator."
                 ) from None
             if result.returncode != 0:
+                if return_failures:
+                    failed_pages.append(number)
+                    continue
                 raise QuoteAnalysisError(
                     "Could not recognize text in a scanned PDF page. Try a clearer scan."
                 )
             text = result.stdout.decode("utf-8", errors="replace").strip()
             if text:
-                extracted_pages.append(text)
+                extracted_pages.append(f"[OCR page {number}]\n{text}")
+            elif return_failures:
+                failed_pages.append(number)
 
-    if not extracted_pages:
+    if not extracted_pages and not return_failures:
         raise QuoteAnalysisError(
             "OCR found no readable text in this PDF. Try a clearer scan or a searchable PDF."
         )
-    return _bounded_text(
-        f"[Scanned PDF OCR; at most the first {MAX_OCR_PAGES} pages are included]\n"
-        + "\n".join(extracted_pages)
-    )
+    extracted = ""
+    if extracted_pages:
+        requested = ", ".join(str(page) for page in requested_pages)
+        extracted = _bounded_text(
+            f"[Scanned PDF OCR; at most the first {MAX_OCR_PAGES} pages of this PDF; "
+            f"pages checked: {requested}]\n" + "\n".join(extracted_pages)
+        )
+    return (extracted, sorted(set(failed_pages))) if return_failures else extracted
+
+
+def _pdf_pages_needing_ocr(page_texts):
+    """Find pages with too little unique native text to trust as complete."""
+    normalized_lines = []
+    for page_text in page_texts:
+        lines = set()
+        for line in page_text.splitlines():
+            normalized = re.sub(
+                r"\b(?:page|pg)\.?\s*\d+\s*(?:of\s*\d+|/\s*\d+)?",
+                "page",
+                " ".join(line.casefold().split()),
+            )
+            if normalized:
+                lines.add(normalized)
+        normalized_lines.append(lines)
+
+    occurrences = {}
+    for page_number, lines in enumerate(normalized_lines, start=1):
+        for line in lines:
+            occurrences.setdefault(line, set()).add(page_number)
+    repeated_lines = {line for line, pages in occurrences.items() if len(pages) > 1}
+
+    needs_ocr = []
+    for page_number, page_text in enumerate(page_texts, start=1):
+        unique_text = " ".join(
+            line for line in page_text.splitlines()
+            if " ".join(line.casefold().split()) not in repeated_lines
+            and not re.fullmatch(
+                r"\s*(?:page|pg)\.?\s*\d+\s*(?:of\s*\d+|/\s*\d+)?\s*",
+                line,
+                flags=re.IGNORECASE,
+            )
+        )
+        if len(re.sub(r"[^a-zA-Z0-9\u0080-\uffff]", "", unique_text)) < MIN_PDF_PAGE_TEXT_CHARS:
+            needs_ocr.append(page_number)
+    return needs_ocr
+
+
+def _page_list_label(page_numbers):
+    pages = sorted(set(page_numbers))
+    if not pages:
+        return ""
+    if len(pages) == 1:
+        return f"page {pages[0]}"
+    return "pages " + ", ".join(str(page) for page in pages)
 
 
 def _pdf_page_count(path, deadline=None):
@@ -365,7 +447,8 @@ def _document_text(path, mime_type, deadline=None, metadata=None):
             raise QuoteAnalysisError("Could not read this PDF. Convert it to a text-based PDF or DOCX.") from None
         if result.returncode != 0:
             raise QuoteAnalysisError("Could not extract text from this PDF.")
-        extracted = _bounded_text(result.stdout.decode("utf-8", errors="replace"))
+        raw_extracted = result.stdout.decode("utf-8", errors="replace")
+        extracted = _bounded_text(raw_extracted)
         if not extracted.strip():
             metadata["ocr_page_limit"] = MAX_OCR_PAGES
             metadata["ocr_truncated"] = page_count > MAX_OCR_PAGES if page_count else None
@@ -385,7 +468,79 @@ def _document_text(path, mime_type, deadline=None, metadata=None):
             text = _ocr_pdf(path, deadline)
             # Approval must cover the disclosed page scope as well as the OCR text.
             return _bounded_text(f"[Source warning: {warning}]\n{text}") if warning else text
-        return extracted
+
+        raw_pages = raw_extracted.split("\f")
+        detected_page_count = page_count or min(
+            MAX_PDF_PAGES, max(1, len(raw_pages) - (1 if raw_pages[-1].strip() == "" else 0))
+        )
+        if page_count is None and raw_pages:
+            metadata["pdf_page_count"] = detected_page_count
+        inspect_page_count = min(detected_page_count, MAX_PDF_PAGES)
+        page_texts = raw_pages[:inspect_page_count]
+        coverage_unverified = len(page_texts) < inspect_page_count
+        if coverage_unverified:
+            # Without reliable page breaks, do not treat a little searchable text
+            # as proof that all pages are covered.
+            candidate_pages = list(range(1, min(detected_page_count, MAX_OCR_PAGES) + 1))
+        else:
+            candidate_pages = _pdf_pages_needing_ocr(page_texts)
+        eligible_pages = [page for page in candidate_pages if page <= MAX_OCR_PAGES]
+        omitted_pages = [page for page in candidate_pages if page > MAX_OCR_PAGES]
+        warnings = []
+        ocr_text, failed_pages = "", []
+
+        if candidate_pages:
+            metadata["ocr_page_limit"] = MAX_OCR_PAGES
+        if eligible_pages:
+            try:
+                ocr_text, failed_pages = _ocr_pdf(
+                    path, deadline, page_numbers=eligible_pages, return_failures=True)
+            except QuoteAnalysisError:
+                failed_pages = eligible_pages
+            if failed_pages:
+                warnings.append(
+                    f"Local OCR could not verify readable quotation text on "
+                    f"{_page_list_label(failed_pages)}. "
+                    "Check the original attachment before choosing a quotation."
+                )
+
+        if omitted_pages:
+            warnings.append(
+                f"Page text is missing or too sparse on {_page_list_label(omitted_pages)}. Local OCR is "
+                f"limited to the first {MAX_OCR_PAGES} PDF pages, so those pages are omitted; "
+                "check the original attachment."
+            )
+        if coverage_unverified:
+            warnings.append(
+                f"Page breaks could not be verified. Local OCR checks at most the first "
+                f"{MAX_OCR_PAGES} PDF pages; check the original attachment for missing content."
+            )
+        if candidate_pages and page_count and page_count > MAX_PDF_PAGES:
+            warnings.append(
+                f"This PDF has {page_count} pages, but local page checks cover only the first "
+                f"{MAX_PDF_PAGES}. Check pages {MAX_PDF_PAGES + 1}–{page_count} in the original."
+            )
+
+        metadata["ocr_truncated"] = bool(
+            omitted_pages or failed_pages or coverage_unverified
+            or (candidate_pages and page_count and page_count > MAX_PDF_PAGES)
+        )
+        metadata["source_warnings"] = warnings
+        warning_text = (
+            "[Source coverage warning: " + " ".join(warnings) + "]\n"
+            if warnings else ""
+        )
+        ocr_text = _bounded_text(
+            ocr_text, max(0, MAX_EXTRACTED_CHARS - len(warning_text))
+        )
+        available_native_chars = max(
+            0, MAX_EXTRACTED_CHARS - len(warning_text) - len(ocr_text) - 1
+        )
+        native_text = _bounded_text(extracted, available_native_chars)
+        combined = warning_text + native_text
+        if ocr_text:
+            combined += "\n" + ocr_text
+        return _bounded_text(combined)
 
     raise QuoteAnalysisError(
         "This file type is not readable here. Supported documents are PDF (including scanned PDFs), "

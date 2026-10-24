@@ -71,7 +71,9 @@ never advance the live inbound timestamp or activate a reply window.
 - Selected scanned PDFs use local Tesseract OCR on at most the first five pages,
   bounded by 90 seconds. Local page-count warnings appear in source review and
   saved comparisons; unknown page counts are disclosed rather than assumed safe.
-  Coverage warnings are part of the reviewed text and remain independent of AI output.
+  Partly searchable PDFs also OCR sparse-text pages within that limit and disclose
+  scanned pages that could not be read or fall beyond it. Coverage warnings are
+  part of the reviewed text and remain independent of AI output.
   Selected legacy XLS files are converted from a temporary
   copy with `ssconvert`; original WhatsApp attachments are never rewritten.
   `tesseract` and `gnumeric` are declared in `.replit`.
