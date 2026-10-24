@@ -25,7 +25,7 @@ outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "exec gunicorn --config gunicorn.conf.py 'src.production:create_production_app()'"
+args = "exec python scripts/start-production.py"
 waitForPort = 5000
 
 [[ports]]
@@ -47,6 +47,6 @@ WHATSAPP_PHONE_NUMBER_ID = "1441593582361913"
 
 [deployment]
 deploymentTarget = "vm"
-run = ["gunicorn", "--config", "gunicorn.conf.py", "src.production:create_production_app()"]
+run = ["python", "scripts/start-production.py"]
 build = ["bash", "scripts/build-production.sh"]
 ignorePorts = false
