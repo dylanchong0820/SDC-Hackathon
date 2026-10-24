@@ -78,6 +78,7 @@ security requirements, tests, and deployment limitations.
 | RunPod Endpoint   | https://by40gb92whagr1.api.runpod.ai            |
 | Slide Deck        |  https://xmueducn-my.sharepoint.com/:p:/g/personal/fis2508047_xmu_edu_my/IQCMzHE0LrcjSpsaZ5UH_qwCAYv5TYET5Zx-jwpB08kmEp8?e=S9uFwx  |
 | Demo Video        | https://youtu.be/23ucObwWn5o                |
+| Live Prototype    | https://sdc-hackathon-jovilim67.replit.app/ |
 
 ---
 
