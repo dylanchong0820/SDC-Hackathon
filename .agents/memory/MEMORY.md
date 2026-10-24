@@ -9,3 +9,4 @@
 - [Currency comparison trust](currency-comparison-trust.md) — preserve dated MYR snapshots for earlier choices; never relax date checks to accept a broken “latest” feed.
 - [Staff workspace responsiveness](staff-responsive-layout.md) — size tools for the space beside the inbox; long chat content must wrap and scroll without shrinking its boxes.
 - [Comparison timing trust](comparison-timing-trust.md) — remote inference includes queue/network wait; overlapping requests must not be summed.
+- [RunPod readiness](runpod-readiness.md) — verify worker routing and release version; successful text inference does not establish image/audio support.
