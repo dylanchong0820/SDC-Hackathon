@@ -69,7 +69,10 @@ never advance the live inbound timestamp or activate a reply window.
   retried from the website. PDFs and arbitrary WhatsApp-supported documents retain
   their file extensions and names. Unique filenames avoid same-second overwrites.
 - Selected scanned PDFs use local Tesseract OCR on at most the first five pages,
-  bounded by 90 seconds. Selected legacy XLS files are converted from a temporary
+  bounded by 90 seconds. Local page-count warnings appear in source review and
+  saved comparisons; unknown page counts are disclosed rather than assumed safe.
+  Coverage warnings are part of the reviewed text and remain independent of AI output.
+  Selected legacy XLS files are converted from a temporary
   copy with `ssconvert`; original WhatsApp attachments are never rewritten.
   `tesseract` and `gnumeric` are declared in `.replit`.
 - Quotation previews require staff authentication and CSRF. Preview performs only

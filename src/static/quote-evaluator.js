@@ -197,6 +197,7 @@
           });
           label.append(checkbox, el("strong", "", source.filename || source.client_name || "Quotation"));
           article.appendChild(label);
+          appendSourceWarnings(article, source);
           if (source.error) {
             const error = el("p", "qe-inline-error", source.error);
             error.setAttribute("role", "alert");
@@ -263,6 +264,8 @@
         if (candidate.client_name) copy.appendChild(el("span", "qe-source-client", candidate.client_name));
         const excerpt = candidate.caption || candidate.body || candidate.attachment_state || "";
         if (excerpt) copy.appendChild(el("span", "qe-source-excerpt", excerpt));
+        const reviewedSource = state.review && (state.review.sources || []).find((source) => source.id === candidate.id);
+        if (reviewedSource) appendSourceWarnings(copy, reviewedSource);
         const status = isSelectable(candidate) ? "Ready to analyze" : "Unavailable — download incomplete";
         copy.appendChild(el("span", `qe-source-status${isSelectable(candidate) ? " ready" : " unavailable"}`, status));
         row.append(checkbox, sourceMark, copy);
@@ -353,6 +356,7 @@
         const vendorCell = el("td", "qe-vendor-cell");
         vendorCell.append(el("strong", "", quote.vendor || quote.client_name || quote.filename || "Quotation"), el("small", "", [quote.client_name, quote.filename].filter(Boolean).join(" · ")));
         if (quote.extraction_error) vendorCell.appendChild(el("small", "qe-warning", quote.extraction_error));
+        appendSourceWarnings(vendorCell, quote);
         row.appendChild(vendorCell);
         row.appendChild(priceBlock(quote, "td", "qe-price"));
         row.appendChild(el("td", "", delivery(quote)));
@@ -381,6 +385,7 @@
         if (String(quote.message_id) === String(recommendedId)) label.appendChild(el("span", "qe-recommended", "Suggested for selected priority"));
         top.append(label, priceBlock(quote, "div", "qe-card-price"));
         card.appendChild(top);
+        appendSourceWarnings(card, quote);
         const facts = el("div", "qe-card-facts");
         facts.append(fact("Delivery", delivery(quote)), fact("Confidence", quote.confidence == null ? "Not stated" : `${Math.round(Number(quote.confidence) * 100)}%`), fact("Price basis", quote.price_basis || "Not stated"));
         card.appendChild(facts);
@@ -438,6 +443,15 @@
     }
     function isActive(evaluation) {
       return evaluation.status === "queued" || evaluation.status === "processing";
+    }
+    function appendSourceWarnings(parent, source) {
+      if (!Array.isArray(source.source_warnings)) return;
+      source.source_warnings.forEach((warning) => {
+        if (typeof warning !== "string" || !warning.trim()) return;
+        const note = el("span", "qe-source-warning", warning);
+        note.setAttribute("role", "note");
+        parent.appendChild(note);
+      });
     }
     function priceBlock(quote, tag, className) {
       const block = el(tag, className);

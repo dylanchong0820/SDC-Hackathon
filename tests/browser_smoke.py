@@ -285,13 +285,17 @@ def run():
                         "el => getComputedStyle(el).overflowY === 'auto' && el.clientHeight > 0"
                     ), f"Inbox messages have no scroll area at {viewport}"
                 # Fixed exchange rates exercise comparison/register views without a live provider.
+                ocr_warning = ("This scanned PDF has 8 pages. Only the first 5 pages are included "
+                               "in OCR and AI analysis; pages 6–8 are omitted. Check the original "
+                               "attachment before choosing a quotation.")
                 currency_evaluation = store.create_quote_evaluation(
-                    ["wamid.browser-text", "wamid.browser-image"], "price")
+                    ["wamid.browser-text", "wamid.browser-document"], "price")
                 currency_result = rank_quotes([
                     {"message_id": "wamid.browser-text", "client_name": "USD Supplier",
                      "currency": "USD", "total_price": 100},
-                    {"message_id": "wamid.browser-image", "client_name": "MYR Supplier",
-                     "currency": "MYR", "total_price": 500},
+                    {"message_id": "wamid.browser-document", "client_name": "MYR Supplier",
+                     "currency": "MYR", "total_price": 500, "pdf_page_count": 8,
+                     "ocr_page_limit": 5, "ocr_truncated": True, "source_warnings": [ocr_warning]},
                 ], "price", {"USD": {"rate": "4.5", "date": "2026-10-23", "source": "Fixture rates"}})
                 store.update_quote_evaluation(currency_evaluation["id"], "completed", result=currency_result)
                 for currency_viewport in ({"width": 1280, "height": 900}, {"width": 390, "height": 844}):
@@ -300,6 +304,7 @@ def run():
                     expect(page.locator(".qe-results")).to_contain_text("Original: USD")
                     expect(page.locator(".qe-results")).to_contain_text("450.00")
                     expect(page.locator(".qe-results")).to_contain_text("2026-10-23")
+                    expect(page.locator(".qe-results .qe-source-warning:visible").first).to_contain_text("8 pages")
                     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1"), "Currency comparison overflows"
                     page.screenshot(path=str(outputs / f"currency-comparison-{currency_viewport['width']}.png"), full_page=True)
                     page.get_by_role("button", name="Quotation register", exact=True).click()
@@ -309,6 +314,28 @@ def run():
                     page.screenshot(path=str(outputs / f"currency-register-{currency_viewport['width']}.png"), full_page=True)
                 page.set_viewport_size({"width": 390, "height": 844})
                 page.get_by_role("button", name="Settings", exact=True).click()
+                # The review warning must appear beside the selected file and its confirmation.
+                def fake_ocr_preview(route):
+                    route.fulfill(json={
+                        "sources": [{"id": "wamid.browser-document", "filename": "test-document.pdf",
+                                     "text": "OCR of the first five pages: MYR 500", "error": "",
+                                     "pdf_page_count": 8, "ocr_page_limit": 5, "ocr_truncated": True,
+                                     "source_warnings": [ocr_warning]}],
+                        "review_token": "isolated-ui-fixture-not-submitted", "expires_in": 600,
+                    })
+                page.route("**/api/quote-previews", fake_ocr_preview)
+                try:
+                    page.get_by_role("button", name="Compare quotations", exact=True).click()
+                    pdf_source = page.locator(".qe-source").filter(has_text="test-document.pdf")
+                    pdf_source.locator('input[type="checkbox"]').check()
+                    page.get_by_role("button", name="Review selected", exact=True).click()
+                    expect(page.locator(".qe-review .qe-source-warning")).to_contain_text("pages 6–8 are omitted")
+                    expect(pdf_source.locator(".qe-source-warning")).to_be_visible()
+                    expect(page.get_by_role("checkbox", name="Confirm test-document.pdf", exact=True)).to_be_enabled()
+                    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+                    page.locator(".qe-review").screenshot(path=str(outputs / "ocr-limit-review.png"), animations="disabled")
+                finally:
+                    page.unroute("**/api/quote-previews", fake_ocr_preview)
                 check_chat_layout(page, outputs)
                 page.get_by_role("button", name="Settings", exact=True).click()
                 # A second employee must drop cached messages when another clears history.

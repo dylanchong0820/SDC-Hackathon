@@ -287,7 +287,11 @@ class QuoteAnalysisTests(unittest.TestCase):
             finally:
                 browser.close()
 
-        text = _document_text(pdf, "application/pdf").casefold()
+        metadata = {}
+        text = _document_text(pdf, "application/pdf", metadata=metadata).casefold()
+        self.assertEqual(metadata["pdf_page_count"], 1)
+        self.assertFalse(metadata["ocr_truncated"])
+        self.assertFalse(metadata["source_warnings"])
         self.assertIn("northwind", text)
         self.assertIn("myr 128", text)
         self.assertIn(f"first {MAX_OCR_PAGES} pages", text)
@@ -299,6 +303,8 @@ class QuoteAnalysisTests(unittest.TestCase):
 
         def fake_run(args, **kwargs):
             commands.append((args, kwargs))
+            if args[0] == "pdfinfo":
+                return SimpleNamespace(returncode=0, stdout=b"Pages: 7\n")
             if args[0] == "pdftotext":
                 return SimpleNamespace(returncode=0, stdout=b"")
             if args[0] == "pdftoppm":
@@ -308,8 +314,12 @@ class QuoteAnalysisTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stdout=b"")
             return SimpleNamespace(returncode=0, stdout=b"MYR 128")
 
+        metadata = {}
         with patch("src.quote_analysis.subprocess.run", side_effect=fake_run):
-            result = _document_text(pdf, "application/pdf")
+            result = _document_text(pdf, "application/pdf", metadata=metadata)
+        self.assertEqual(metadata["pdf_page_count"], 7)
+        self.assertTrue(metadata["ocr_truncated"])
+        self.assertIn("pages 6–7 are omitted", metadata["source_warnings"][0])
         self.assertEqual(
             sum(args[0] == "tesseract" for args, _ in commands),
             MAX_OCR_PAGES,
@@ -322,6 +332,77 @@ class QuoteAnalysisTests(unittest.TestCase):
             for args, kwargs in commands if args[0] == "tesseract"
         ))
 
+    def test_ocr_warning_survives_review_and_is_saved_without_model_cooperation(self):
+        self.login()
+        self.add_message("scan-seven", kind="document", filename="scan-seven.pdf",
+                         mime_type="application/pdf")
+        path = self.store.attachments / "scan-seven.pdf"
+        original = b"isolated scanned PDF fixture"
+        path.write_bytes(original)
+        self.store.media_saved(self.store.message("scan-seven"), path,
+                               "application/pdf", "scan-seven.pdf")
+        commands = []
+        def fake_run(args, **kwargs):
+            commands.append(args)
+            if args[0] == "pdfinfo":
+                return SimpleNamespace(returncode=0, stdout=b"Pages: 7\n")
+            if args[0] == "pdftotext":
+                return SimpleNamespace(returncode=0, stdout=b"")
+            if args[0] == "pdftoppm":
+                for index in range(1, 8):
+                    Path(f"{args[-1]}-{index:02}.jpg").write_bytes(b"image")
+                return SimpleNamespace(returncode=0, stdout=b"")
+            page_number = int(Path(args[1]).stem.split("-")[-1])
+            return SimpleNamespace(returncode=0, stdout=f"PAGE_{page_number}_PRICE MYR 128".encode())
+
+        with patch("src.quote_analysis.subprocess.run", side_effect=fake_run):
+            review = self.post("/api/quote-previews", {"message_ids": ["scan-seven"]})
+            self.assertEqual(review.status_code, 200)
+            source = review.json["sources"][0]
+            self.assertEqual(source["pdf_page_count"], 7)
+            self.assertEqual(source["ocr_page_limit"], 5)
+            self.assertTrue(source["ocr_truncated"])
+            self.assertIn("first 5", source["source_warnings"][0])
+            self.assertNotIn("PAGE_6_PRICE", source["text"])
+            self.assertNotIn("PAGE_7_PRICE", source["text"])
+            started = self.post("/api/quote-evaluations", {
+                "message_ids": ["scan-seven"], "priority": "price",
+                "review_token": review.json["review_token"]})
+            self.assertEqual(started.status_code, 202)
+            worker = QuoteAnalysisWorker(self.store, "https://example.api.runpod.ai", "test-key")
+            with patch.object(worker, "_request_model", return_value={"quotes": [{
+                "quote_key": "QUOTE_1", "currency": "MYR", "total_price": 128,
+                "source_warnings": [],  # The model cannot suppress local warnings.
+            }]}) as model:
+                worker._analyze(started.json["evaluation"]["id"])
+        payload = str(model.call_args.args[0])
+        self.assertNotIn("PAGE_6_PRICE", payload)
+        self.assertNotIn("PAGE_7_PRICE", payload)
+        self.assertIn("first 5", payload)
+        saved = self.store.quote_evaluation(started.json["evaluation"]["id"])["result"]["quotes"][0]
+        self.assertEqual(saved["source_warnings"], source["source_warnings"])
+        self.assertEqual(saved["pdf_page_count"], 7)
+        self.assertTrue(saved["ocr_truncated"])
+        self.assertEqual(sum(args[0] == "tesseract" for args in commands), 10)
+        self.assertEqual(path.read_bytes(), original)
+
+    def test_ocr_warning_boundary_unknown_count_and_searchable_pdf(self):
+        pdf = Path(self.directory.name) / "boundary.pdf"
+        pdf.write_bytes(b"test PDF")
+        for count in (5, 6, None):
+            metadata = {}
+            with patch("src.quote_analysis._pdf_page_count", return_value=count), \
+                 patch("src.quote_analysis.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=b"")), \
+                 patch("src.quote_analysis._ocr_pdf", return_value="MYR 128"):
+                _document_text(pdf, "application/pdf", metadata=metadata)
+            self.assertEqual(bool(metadata["source_warnings"]), count != 5)
+            self.assertEqual(metadata["ocr_truncated"], None if count is None else count > 5)
+        metadata = {}
+        with patch("src.quote_analysis._pdf_page_count", return_value=8), \
+             patch("src.quote_analysis.subprocess.run", return_value=SimpleNamespace(returncode=0, stdout=b"Full searchable text")):
+            self.assertEqual(_document_text(pdf, "application/pdf", metadata=metadata), "Full searchable text")
+        self.assertEqual(metadata["pdf_page_count"], 8)
+        self.assertFalse(metadata.get("source_warnings"))
     def test_scanned_pdf_renderer_timeout_is_a_clear_per_file_error(self):
         pdf = Path(self.directory.name) / "stalled-scan.pdf"
         pdf.write_bytes(b"test PDF")

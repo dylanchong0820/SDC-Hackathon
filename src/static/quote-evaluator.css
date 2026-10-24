@@ -117,6 +117,7 @@
 .qe-vendor-cell small { margin-top:4px; color:hsl(var(--qe-muted)); font-size:9px; }
 .qe-price { font:500 11px var(--qe-font-mono); }
 .qe-price-detail { display:block; margin-top:5px; font:400 11px/1.5 var(--qe-font-body, sans-serif); overflow-wrap:anywhere; }
+.qe-source-warning { display:block; min-width:0; margin:8px 0; padding:9px 11px; border:1px solid hsl(38 61% 67%); border-radius:8px; background:hsl(43 78% 93%); color:hsl(28 64% 24%); font:500 11px/1.55 sans-serif; white-space:normal; overflow-wrap:anywhere; }
 .qe-card-price { min-width:0; max-width:55%; overflow-wrap:anywhere; }
 .qe-evidence-cell { min-width:185px; }
 .qe-evidence-cell small { display:block; margin-top:4px; color:hsl(var(--qe-muted)); }

@@ -33,8 +33,11 @@ locally in English, Malay, and Simplified/Traditional Chinese, using at most the
 first five pages and a 90-second OCR limit. Legacy XLS files are converted in a
 temporary directory before reading; the original WhatsApp attachment is unchanged.
 Processing limits are 5 MB per image/audio file, 9 MB combined image/audio data,
-and 20 MB per document. PDF, OCR, legacy Excel, and legacy Word reading use the
-`pdftotext`, `pdftoppm`, `tesseract`, `ssconvert`, and `antiword` utilities
+and 20 MB per document. Scans longer than five pages show their total page count
+and omitted page range beside the reviewed source and in the saved comparison.
+If the page count cannot be verified, staff see an explicit coverage warning.
+PDF, OCR, legacy Excel, and legacy Word reading use the
+`pdfinfo`, `pdftotext`, `pdftoppm`, `tesseract`, `ssconvert`, and `antiword` utilities
 configured in `.replit`. Video files remain archived but are not analyzed.
 
 See [replit.md](replit.md) for the complete configuration, storage behavior,

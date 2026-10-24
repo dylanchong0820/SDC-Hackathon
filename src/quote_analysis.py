@@ -38,6 +38,7 @@ MAX_OCR_SECONDS = 90
 MAX_OCR_RENDER_SECONDS = 25
 MAX_OCR_PAGE_SECONDS = 15
 MAX_OCR_IMAGE_BYTES = 3 * 1024 * 1024
+SOURCE_METADATA_FIELDS = ("pdf_page_count", "ocr_page_limit", "ocr_truncated", "source_warnings")
 MAX_XLS_CONVERT_SECONDS = 25
 OCR_LANGUAGES = "eng+msa+chi_sim+chi_tra"
 
@@ -290,7 +291,20 @@ def _ocr_pdf(path, deadline=None):
     )
 
 
-def _document_text(path, mime_type, deadline=None):
+def _pdf_page_count(path, deadline=None):
+    try:
+        result = subprocess.run(
+            ["pdfinfo", str(path)], capture_output=True,
+            timeout=_reading_timeout(5, deadline), check=False)
+        # PDF metadata can contain newlines; the tool's real Pages field follows it.
+        matches = re.findall(rb"^Pages:\s+(\d+)\s*$", result.stdout, re.MULTILINE)
+        count = int(matches[-1]) if result.returncode == 0 and matches else 0
+        return count if count > 0 else None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+
+
+def _document_text(path, mime_type, deadline=None, metadata=None):
     extension = path.suffix.lower()
     mime_type = (mime_type or mimetypes.guess_type(path.name)[0] or "").split(";", 1)[0].lower()
 
@@ -338,6 +352,9 @@ def _document_text(path, mime_type, deadline=None):
         return _bounded_text(result.stdout.decode("utf-8", errors="replace"))
 
     if extension == ".pdf" or mime_type == "application/pdf":
+        metadata = metadata if metadata is not None else {}
+        page_count = _pdf_page_count(path, deadline)
+        metadata["pdf_page_count"] = page_count
         try:
             result = subprocess.run(
                 ["pdftotext", "-layout", "-enc", "UTF-8", "-f", "1",
@@ -350,7 +367,24 @@ def _document_text(path, mime_type, deadline=None):
             raise QuoteAnalysisError("Could not extract text from this PDF.")
         extracted = _bounded_text(result.stdout.decode("utf-8", errors="replace"))
         if not extracted.strip():
-            return _ocr_pdf(path, deadline)
+            metadata["ocr_page_limit"] = MAX_OCR_PAGES
+            metadata["ocr_truncated"] = page_count > MAX_OCR_PAGES if page_count else None
+            warning = ""
+            if page_count and page_count > MAX_OCR_PAGES:
+                warning = (
+                    f"This scanned PDF has {page_count} pages. Only the first {MAX_OCR_PAGES} "
+                    f"pages are included in OCR and AI analysis; pages {MAX_OCR_PAGES + 1}–{page_count} "
+                    "are omitted. Check the original attachment before choosing a quotation."
+                )
+            elif page_count is None:
+                warning = (
+                    f"The PDF page count could not be verified. OCR and AI analysis include at most "
+                    f"the first {MAX_OCR_PAGES} pages. Check the original attachment for omitted pages."
+                )
+            metadata["source_warnings"] = [warning] if warning else []
+            text = _ocr_pdf(path, deadline)
+            # Approval must cover the disclosed page scope as well as the OCR text.
+            return _bounded_text(f"[Source warning: {warning}]\n{text}") if warning else text
         return extracted
 
     raise QuoteAnalysisError(
@@ -443,6 +477,7 @@ def _normalize_model_quote(raw, key, candidate):
         "evidence": _bounded_text(raw.get("evidence"), 700),
         "confidence": min(1.0, max(0.0, confidence)) if confidence is not None else None,
         "notes": notes,
+        **{field: candidate[field] for field in SOURCE_METADATA_FIELDS if field in candidate},
         "rank": None,
         "score": None,
         "recommended": False,
@@ -688,6 +723,7 @@ class QuoteAnalysisWorker:
         media_total, total_text = 0, 0
         deadline = time.monotonic() + 120
         for row in rows:
+            source_metadata = {}
             # A fixed key lets staff confirm a subset without changing the digest.
             preview = {
                 "id": row["id"], "client_name": row.get("client_name", ""),
@@ -696,7 +732,7 @@ class QuoteAnalysisWorker:
             try:
                 _reading_timeout(120, deadline)
                 _, parts, next_media_total = self._prepare_message(
-                    row, "REVIEW", media_total, deadline=deadline)
+                    row, "REVIEW", media_total, deadline=deadline, source_metadata=source_metadata)
                 _reading_timeout(120, deadline)
                 text = "\n".join(part["text"] for part in parts if part.get("type") == "text")
                 if total_text + len(text) > MAX_TOTAL_TEXT_CHARS:
@@ -711,16 +747,19 @@ class QuoteAnalysisWorker:
                 preview["error"] = str(error)
             except OSError:
                 preview["error"] = "This source could not be read. Refresh the sources and try again."
+            preview.update({field: source_metadata[field] for field in SOURCE_METADATA_FIELDS
+                            if field in source_metadata})
             previews.append(preview)
         return previews, digests
 
-    def _prepare_message(self, row, quote_key, media_total, deadline=None):
-        candidate = {
+    def _prepare_message(self, row, quote_key, media_total, deadline=None, source_metadata=None):
+        candidate = source_metadata if source_metadata is not None else {}
+        candidate.update({
             "id": row["id"],
             "client_name": row.get("client_name") or "",
             "filename": row.get("filename") or "",
             "timestamp": row.get("timestamp"),
-        }
+        })
         prompt_text = [f"Quotation {quote_key}."]
         body = (row.get("body") or "").strip()
         caption = (row.get("caption") or "").strip()
@@ -765,7 +804,7 @@ class QuoteAnalysisWorker:
             else:
                 if size > MAX_DOCUMENT_BYTES:
                     raise QuoteAnalysisError("This document exceeds the local text extraction size limit.")
-                extracted = _document_text(path, mime_type, deadline=deadline)
+                extracted = _document_text(path, mime_type, deadline=deadline, metadata=candidate)
                 if not extracted.strip():
                     raise QuoteAnalysisError("No readable text was found in this document.")
                 prompt_text.append(f"Extracted document text:\n{extracted}")
@@ -910,8 +949,10 @@ class QuoteAnalysisWorker:
             if self._is_cancelled(evaluation_id):
                 return
             quote_key = f"QUOTE_{index}"
+            source_metadata = {}
             try:
-                candidate, parts, media_total = self._prepare_message(row, quote_key, media_total)
+                candidate, parts, media_total = self._prepare_message(
+                    row, quote_key, media_total, source_metadata=source_metadata)
                 if row.get("reviewed_digest"):
                     if quote_source_digest(parts) != row["reviewed_digest"]:
                         raise QuoteAnalysisError(
@@ -928,6 +969,8 @@ class QuoteAnalysisWorker:
                     "id": row["id"],
                     "client_name": row.get("client_name") or "",
                     "filename": row.get("filename") or "",
+                    **{field: source_metadata[field] for field in SOURCE_METADATA_FIELDS
+                       if field in source_metadata},
                 })
                 prepared.append((quote_key, candidates[-1], str(error)))
         if not any(error is None for _, _, error in prepared):
