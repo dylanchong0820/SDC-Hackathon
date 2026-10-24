@@ -334,7 +334,9 @@
           } else if (progress.stage === "ranking") {
             progressText = "Quotation results are ready. Converting prices and ranking…";
           }
-          resultHead.appendChild(el("p", "qe-progress-note", progressText));
+          const progressNote = el("p", "qe-progress-note", progressText);
+          progressNote.setAttribute("role", "status");
+          resultHead.appendChild(progressNote);
           const cancelNote = el(
             "p", "qe-cancel-note",
             "Stop to change your sources or priority. The app will discard late results; RunPod may continue the in-flight request remotely."
@@ -355,7 +357,7 @@
           resultHead.appendChild(el("p", "qe-inline-error", evaluation.error || "Analysis could not be completed."));
         }
         section.appendChild(resultHead);
-        if (isActiveEvaluation && !Array.isArray(result.quotes)) {
+        if (isActiveEvaluation && (!Array.isArray(result.quotes) || !result.quotes.length)) {
           const progress = el("div", "qe-progress");
           progress.setAttribute("role", "status");
           progress.append(el("span", "qe-skeleton qe-sk-title"), el("span", "qe-skeleton qe-sk-row"), el("span", "qe-skeleton qe-sk-row"));
@@ -380,7 +382,9 @@
           if (hasPartialResults) {
             section.appendChild(el(
               "p", "qe-progress-note qe-partial-note",
-              "Partial results are shown as each source finishes. Final ranking and MYR conversion appear when analysis completes."
+              isActiveEvaluation
+                ? "Partial results are shown as each source finishes. Final ranking and MYR conversion appear when analysis completes."
+                : "These are saved partial results, not a final ranking. Start a new comparison to analyze all sources again."
             ));
           }
           const tableWrap = el("div", "qe-table-wrap");
@@ -530,8 +534,12 @@
     }
     function priceBlock(quote, tag, className, partial = false) {
       const block = el(tag, className);
-      const value = partial && quote.total_price != null
-        ? money(quote.currency, quote.total_price)
+      const value = partial
+        ? quote.total_price == null
+          ? "Price not extracted"
+          : quote.currency
+            ? money(quote.currency, quote.total_price)
+            : `${money(null, quote.total_price)} (currency not stated)`
         : quote.myr_total_price == null
           ? "MYR unavailable"
           : money("MYR", quote.myr_total_price);
@@ -682,15 +690,18 @@
       if (state.destroyed) return;
       try {
         const response = await request(`/api/quote-evaluations/${encodeURIComponent(id)}`);
+        if (state.destroyed || !state.evaluation || String(state.evaluation.id) !== String(id)) return;
         if (response && response.evaluation) {
+          const changed = JSON.stringify(state.evaluation) !== JSON.stringify(response.evaluation);
           state.evaluation = response.evaluation;
           rememberEvaluation(state.evaluation);
-          render();
+          if (changed) render();
           if (isActive(state.evaluation)) state.pollTimer = window.setTimeout(() => pollEvaluation(id), 1800);
           return;
         }
         state.error = "The analysis status could not be read.";
       } catch (error) {
+        if (state.destroyed || !state.evaluation || String(state.evaluation.id) !== String(id)) return;
         state.error = error && error.message ? error.message : "Could not refresh analysis status.";
         state.pollTimer = window.setTimeout(() => pollEvaluation(id), 3500);
       }

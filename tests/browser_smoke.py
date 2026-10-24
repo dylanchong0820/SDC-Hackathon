@@ -137,7 +137,15 @@ def run():
         document.write_bytes(b"%PDF-1.4\n% isolated download test\n%%EOF")
         store.media_saved(store.message("wamid.browser-document"), document, "application/pdf", "test-document.pdf")
         active_comparison = store.create_quote_evaluation(["wamid.browser-text"], "balanced")
-        store.update_quote_evaluation(active_comparison["id"], "processing")
+        store.update_quote_evaluation(active_comparison["id"], "processing", result={
+            "partial": True,
+            "progress": {"stage": "analyzing", "completed": 1, "total": 2},
+            "quotes": [{
+                "message_id": "wamid.browser-text", "vendor": "Partial supplier",
+                "currency": "USD", "total_price": 42, "delivery_text": "3 calendar days",
+                "confidence": 0.9, "evidence": "USD 42; 3 calendar days",
+            }],
+        })
         server = make_server("127.0.0.1", 0, app, threaded=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -262,6 +270,12 @@ def run():
                         page.locator(selector).wait_for()
                         expect(page.get_by_role("button", name=navigation, exact=True)).to_have_attribute("aria-current", "page")
                         if navigation == "Compare quotations" and viewport["width"] == 390:
+                            expect(page.locator(".qe-partial-note")).to_be_visible()
+                            expect(page.locator(".qe-progress-note").first).to_contain_text(
+                                "RunPod has returned 1 of 2 quotation results.")
+                            expect(page.locator(".qe-quote-card")).to_contain_text("Partial supplier")
+                            expect(page.locator(".qe-card-choose")).to_be_disabled()
+                            page.screenshot(path=str(outputs / "quote-partial-mobile.png"), full_page=True)
                             page.get_by_role("button", name="Stop comparison", exact=True).click()
                             expect(page.get_by_text(
                                 "Comparison stopped. You can change the selected sources or priority and start another comparison."

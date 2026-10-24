@@ -21,6 +21,15 @@ Local preview has a two-minute combined extraction budget. The app verifies that
 source content still matches the review before sending it to AI. Original files
 are never rewritten by review or comparison.
 
+Comparisons run in the background. The page reports local-reading and RunPod
+progress, then displays each quotation's validated result as it finishes. Up to
+two per-quotation requests run at once; each has a 10-second connection timeout
+and a 240-second response-read timeout. Timeout, busy-endpoint, and format errors
+are shown per source, while successful results are retained. Partial prices are
+labeled in their original currencies; final MYR conversion, ranking, and selection
+are available only after the comparison finishes. Staff can keep using other
+pages while it runs.
+
 Set `RUNPOD_API_KEY` in Replit Secrets. The app discovers the served model from
 the configured endpoint's OpenAI-compatible `/v1/models` route; the endpoint
 must also support `/v1/chat/completions`. `RUNPOD_ENDPOINT_URL` can override the

@@ -86,6 +86,7 @@ never advance the live inbound timestamp or activate a reply window.
   interactive replies, orders, system/future types). Raw payloads are staff-only.
 - Quote AI Chat sends saved completed comparison facts to the configured RunPod model on each request. It omits phone numbers, message IDs, raw attachment files, and unsaved inbox content. Each answer generates a four-column PDF in the response; PDFs and temporary chat transcripts are not stored in inbox history.
 - Staff can stop queued or running comparisons. Cancellation prevents an in-flight result from being saved; the configured OpenAI-compatible RunPod endpoint does not expose a job ID or remote cancellation route, so RunPod may continue that request until it finishes or times out.
+- Comparison jobs publish reading/model/ranking progress and per-source partial facts through the existing polling API. Up to two per-source RunPod requests execute concurrently per comparison; errors are retained per source instead of dropping successful quotations. Connect/read timeouts are 10/240 seconds. Polling does not rebuild an unchanged comparison view.
 - Text sends: at most 4096 characters, only within the 24-hour customer-service
   window since an inbound customer message. Starting an empty conversation does
   not send anything or open that window. Approved-template sends are not part of

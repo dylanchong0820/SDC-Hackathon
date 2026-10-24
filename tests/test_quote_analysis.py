@@ -218,13 +218,23 @@ class QuoteAnalysisTests(unittest.TestCase):
         worker.model_id = "test-model"
         with patch("src.quote_analysis.requests.post", side_effect=requests.ReadTimeout) as post:
             with self.assertRaisesRegex(QuoteAnalysisError, "response timeout"):
-                worker._request_model([], evaluation_id=41)
+                worker._request_model([])
         self.assertEqual(post.call_args.kwargs["timeout"], (10, 37))
 
         with patch("src.quote_analysis.requests.post", return_value=SimpleNamespace(
                 status_code=429, ok=False)):
             with self.assertRaisesRegex(QuoteAnalysisError, "RunPod is busy"):
-                worker._request_model([], evaluation_id=42)
+                worker._request_model([])
+        for status, message in (
+                (401, "rejected the API key"),
+                (415, "rejected one or more selected formats"),
+                (504, "gateway timed out"),
+                (500, "HTTP 500")):
+            with self.subTest(status=status), patch(
+                    "src.quote_analysis.requests.post",
+                    return_value=SimpleNamespace(status_code=status, ok=False)):
+                with self.assertRaisesRegex(QuoteAnalysisError, message):
+                    worker._request_model([])
 
     def test_comparison_persists_partial_results_while_other_sources_run(self):
         self.login()
@@ -287,6 +297,34 @@ class QuoteAnalysisTests(unittest.TestCase):
             self.assertEqual(len(completed["result"]["quotes"]), 2)
         finally:
             release_slow_request.set()
+
+    def test_one_failed_runpod_source_does_not_discard_other_results(self):
+        self.add_message("usable-one", "MYR 120, delivery in 3 days.")
+        self.add_message("timeout-two", "MYR 140, delivery in 5 days.")
+        evaluation = self.store.create_quote_evaluation(
+            ["usable-one", "timeout-two"], "balanced")
+        worker = QuoteAnalysisWorker(
+            self.store, "https://example.api.runpod.ai", "fake-test-key")
+        worker.model_id = "test-model"
+
+        def fake_model_request(user_content, _evaluation_id=None):
+            prompt = "\n".join(
+                part.get("text", "") for part in user_content if part.get("type") == "text")
+            if "Quotation QUOTE_2" in prompt:
+                raise QuoteAnalysisError("RunPod response timeout for this quotation.")
+            return {"quotes": [{
+                "quote_key": "QUOTE_1", "currency": "MYR", "total_price": 120,
+                "delivery_days": 3, "delivery_unit": "calendar_days",
+            }]}
+
+        with patch.object(worker, "_request_model", side_effect=fake_model_request):
+            worker._analyze(evaluation["id"])
+        saved = self.store.quote_evaluation(evaluation["id"])
+        self.assertEqual(saved["status"], "completed")
+        by_id = {quote["message_id"]: quote for quote in saved["result"]["quotes"]}
+        self.assertEqual(by_id["usable-one"]["myr_total_price"], 120)
+        self.assertIn("timeout", by_id["timeout-two"]["extraction_error"])
+        self.assertTrue(any("1 of 2" in note for note in saved["result"]["limitations"]))
 
     def test_quote_sources_are_private_persisted_and_selectable(self):
         self.add_message("quote-one", "MYR 950, delivery within 6 calendar days.")
@@ -537,6 +575,7 @@ class QuoteAnalysisTests(unittest.TestCase):
             self.assertEqual(started.status_code, 202)
             worker = QuoteAnalysisWorker(
                 self.store, "https://example.api.runpod.ai", "test-key")
+            worker.model_id = "test-model"
             with patch.object(worker, "_request_model", return_value={"quotes": [{
                 "quote_key": "QUOTE_1", "currency": "MYR", "total_price": 128,
                 "source_warnings": [],
@@ -893,7 +932,8 @@ class QuoteAnalysisTests(unittest.TestCase):
                 worker.jobs.join()
             current = self.store.quote_evaluation(evaluation["id"])
             self.assertEqual(current["status"], "cancelled")
-            self.assertEqual(current["result"], {})
+            self.assertTrue(current["result"]["partial"])
+            self.assertEqual(current["result"]["quotes"], [])
         finally:
             finish_request.set()
 
