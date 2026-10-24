@@ -429,13 +429,27 @@ def _pdf_pages_with_large_images(path, page_count, deadline=None):
             re.MULTILINE | re.IGNORECASE,
         )
     }
+    page_rotations = {
+        int(match.group(1)): int(match.group(2)) % 360
+        for match in re.finditer(
+            r"^Page\s+(\d+)\s+rot:\s+(-?\d+)\s*$",
+            page_output,
+            re.MULTILINE | re.IGNORECASE,
+        )
+    }
 
     image_pages = set()
     for page_number, width, height, x_ppi, y_ppi in image_rows:
         page_size = page_sizes.get(page_number)
-        if not page_size or min(page_size) <= 0:
+        rotation = page_rotations.get(page_number)
+        if not page_size or min(page_size) <= 0 or rotation not in (0, 90, 180, 270):
             return [], True
         page_width, page_height = page_size
+        # pdfinfo reports unrotated page dimensions, while image resolution
+        # follows the image's own axes. Upright images on quarter-turned pages
+        # must be measured against the displayed page, not its MediaBox axes.
+        if rotation in (90, 270):
+            page_width, page_height = page_height, page_width
         width_fraction = (width / x_ppi * 72) / page_width
         height_fraction = (height / y_ppi * 72) / page_height
         # Small marks and thin banners are usually decorative; substantial regions

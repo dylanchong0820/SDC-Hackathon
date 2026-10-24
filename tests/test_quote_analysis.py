@@ -21,6 +21,8 @@ from src.quote_analysis import (
     QuoteAnalysisError,
     QuoteAnalysisWorker,
     _document_text,
+    _ocr_pdf,
+    _pdf_pages_with_large_images,
     rank_quotes,
 )
 from src.server import create_app
@@ -123,7 +125,8 @@ class QuoteAnalysisTests(unittest.TestCase):
             finally:
                 browser.close()
 
-    def _make_hybrid_image_table_pdf(self, pdf, decorative=False, page_count=1, image_page=1):
+    def _make_hybrid_image_table_pdf(self, pdf, decorative=False, page_count=1, image_page=1,
+                                     page_layouts=None):
         from playwright.sync_api import sync_playwright
 
         chromium = (
@@ -156,13 +159,15 @@ class QuoteAnalysisTests(unittest.TestCase):
                         "<span>Installation</span><strong>MYR 35</strong></div></div>"
                     )
                     image_selector = "#art"
-                image = base64.b64encode(
-                    page.locator(image_selector).screenshot(type="png")
-                ).decode("ascii")
+                image_bytes = page.locator(image_selector).screenshot(type="jpeg", quality=95)
+                if page_layouts is not None:
+                    self._write_rotated_image_pdf(pdf, image_bytes, decorative, page_layouts)
+                    return
+                image = base64.b64encode(image_bytes).decode("ascii")
                 pages = []
                 for index in range(1, page_count + 1):
                     image_markup = (
-                        f'<img class="quote-image" src="data:image/png;base64,{image}">'
+                        f'<img class="quote-image" src="data:image/jpeg;base64,{image}">'
                         if index == image_page else ""
                     )
                     pages.append(
@@ -185,6 +190,205 @@ class QuoteAnalysisTests(unittest.TestCase):
                 page.pdf(path=str(pdf), print_background=True)
             finally:
                 browser.close()
+
+    @staticmethod
+    def _write_rotated_image_pdf(pdf, image, decorative, layouts):
+        """Build real /Rotate and per-page MediaBox fixtures without a PDF dependency.
+
+        Layouts are (unrotated width, unrotated height, rotation, image width,
+        image height). Image sizes use displayed-page points. Counter-rotate
+        content so the rendered quotation is upright, as in exported scans.
+        A zero image width omits the image on that page.
+        """
+        objects = [b"", b"", b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+
+        def stream(data, attributes=""):
+            return (f"<< /Length {len(data)} {attributes} >>\nstream\n".encode()
+                    + data + b"\nendstream")
+
+        pixels = (170, 55) if decorative else (700, 270)
+        objects.append(stream(image, "/Type /XObject /Subtype /Image "
+                              f"/Width {pixels[0]} /Height {pixels[1]} "
+                              "/ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode"))
+        pages = []
+        for index, (width, height, rotation, image_width, image_height) in enumerate(layouts, 1):
+            display_height = width if rotation in (90, 270) else height
+            transform = {
+                0: "1 0 0 1 0 0",
+                90: f"0 1 -1 0 {width} 0",
+                180: f"-1 0 0 -1 {width} {height}",
+                270: f"0 -1 1 0 0 {height}",
+            }[rotation]
+            content = (
+                f"q {transform} cm BT /F1 12 Tf 16 TL 30 {display_height - 30} Td "
+                f"(Supplier: Northwind Tools quotation Q-300{index}.) Tj T* "
+                "(Delivery is included within six calendar days, with service support.) Tj T* "
+                f"(Section {index}: warranty, payment milestones and installation coordination.) Tj "
+                "ET\n"
+            )
+            if image_width:
+                content += (
+                    f"q {image_width} 0 0 {image_height} 30 "
+                    f"{display_height - 110 - image_height} cm /Im1 Do Q\n"
+                )
+            content += "Q"
+            objects.append(stream(content.encode("ascii")))
+            content_id = len(objects)
+            objects.append(
+                (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {width} {height}] "
+                 f"/Rotate {rotation} /Resources << /Font << /F1 3 0 R >> "
+                 f"/XObject << /Im1 4 0 R >> >> /Contents {content_id} 0 R >>").encode()
+            )
+            pages.append(f"{len(objects)} 0 R")
+        objects[0] = b"<< /Type /Catalog /Pages 2 0 R >>"
+        objects[1] = f"<< /Type /Pages /Count {len(pages)} /Kids [{' '.join(pages)}] >>".encode()
+        data = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, obj in enumerate(objects, 1):
+            offsets.append(len(data))
+            data.extend(f"{number} 0 obj\n".encode() + obj + b"\nendobj\n")
+        xref = len(data)
+        data.extend(f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n".encode())
+        for offset in offsets:
+            data.extend(f"{offset:010} 00000 n \n".encode())
+        data.extend((f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+                     f"startxref\n{xref}\n%%EOF\n").encode())
+        pdf.write_bytes(data)
+
+    def test_rotated_mixed_size_image_tables_are_detected_and_ocrd(self):
+        pdf = Path(self.directory.name) / "rotated-mixed-pricing.pdf"
+        self._make_hybrid_image_table_pdf(pdf, page_layouts=[
+            (595, 842, 0, 525, 202.5),
+            (595, 842, 90, 525, 202.5),
+            (612, 792, 180, 525, 202.5),
+            (420, 595, 270, 525, 202.5),
+            (842, 595, 0, 525, 202.5),
+        ])
+        self.assertEqual(_pdf_pages_with_large_images(pdf, 5), ([1, 2, 3, 4, 5], False))
+        metadata = {}
+        text = _document_text(pdf, "application/pdf", metadata=metadata)
+        self.assertEqual(metadata["pdf_page_count"], 5)
+        self.assertEqual(metadata["ocr_page_limit"], 5)
+        self.assertFalse(metadata["ocr_truncated"])
+        self.assertEqual(metadata["source_warnings"], [])
+        for number in range(1, 6):
+            with self.subTest(page=number):
+                self.assertIn(f"[OCR page {number}]", text)
+                page_ocr = text.split(f"[OCR page {number}]", 1)[1].split("[OCR page", 1)[0]
+                self.assertIn("MYR 128", page_ocr)
+                self.assertIn("MYR 35", page_ocr)
+
+    def test_rotated_image_table_uses_displayed_page_axes(self):
+        pdf = Path(self.directory.name) / "rotated-small-table.pdf"
+        self._make_hybrid_image_table_pdf(pdf, page_layouts=[
+            (595, 842, 90, 280, 108),
+            (595, 842, 270, 280, 108),
+        ])
+        # Both tables occupy 33% x 18% of their displayed landscape pages.
+        self.assertEqual(_pdf_pages_with_large_images(pdf, 2), ([1, 2], False))
+        metadata = {}
+        text = _document_text(pdf, "application/pdf", metadata=metadata)
+        for number in (1, 2):
+            page_ocr = text.split(f"[OCR page {number}]", 1)[1].split("[OCR page", 1)[0]
+            self.assertIn("MYR 128", page_ocr)
+        self.assertEqual(metadata["source_warnings"], [])
+
+    def test_rotated_mixed_size_decorative_images_do_not_request_ocr(self):
+        pdf = Path(self.directory.name) / "rotated-mixed-logos.pdf"
+        self._make_hybrid_image_table_pdf(pdf, decorative=True, page_layouts=[
+            (595, 842, 0, 127.5, 41.25),
+            (842, 595, 90, 525, 110),
+            (612, 792, 180, 127.5, 41.25),
+            (842, 595, 270, 525, 110),
+            (842, 595, 0, 127.5, 41.25),
+        ])
+        # The stretched, thin banners on pages 2 and 4 are under 16% of
+        # displayed page height, but would exceed it on the unrotated axes.
+        self.assertEqual(_pdf_pages_with_large_images(pdf, 5), ([], False))
+        metadata = {}
+        with patch("src.quote_analysis._ocr_pdf") as ocr:
+            text = _document_text(pdf, "application/pdf", metadata=metadata)
+        ocr.assert_not_called()
+        self.assertIn("Supplier: Northwind Tools", text)
+        self.assertEqual(metadata["source_warnings"], [])
+        self.assertFalse(metadata["ocr_truncated"])
+
+    def test_rotated_image_table_at_page_limit_and_beyond_discloses_omission(self):
+        pdf = Path(self.directory.name) / "rotated-pricing-page-limit.pdf"
+        self._make_hybrid_image_table_pdf(pdf, page_layouts=[
+            (595, 842, 0, 0, 0),
+            (612, 792, 90, 0, 0),
+            (420, 595, 180, 0, 0),
+            (842, 595, 270, 0, 0),
+            (595, 842, 90, 525, 202.5),
+            (420, 595, 270, 525, 202.5),
+        ])
+        metadata = {}
+        with patch("src.quote_analysis._ocr_pdf", wraps=_ocr_pdf) as ocr:
+            text = _document_text(pdf, "application/pdf", metadata=metadata)
+        self.assertEqual(ocr.call_args.kwargs["page_numbers"], [5])
+        self.assertEqual(metadata["pdf_page_count"], 6)
+        self.assertTrue(metadata["ocr_truncated"])
+        self.assertIn("[OCR page 5]", text)
+        self.assertIn("MYR 128", text)
+        self.assertNotIn("[OCR page 6]", text)
+        self.assertTrue(any("sizeable image region on page 6" in warning
+                            for warning in metadata["source_warnings"]))
+
+    def test_rotated_image_table_ocr_failures_keep_coverage_warning(self):
+        pdf = Path(self.directory.name) / "rotated-pricing-failure.pdf"
+        self._make_hybrid_image_table_pdf(pdf, page_layouts=[(595, 842, 90, 525, 202.5)])
+        original = pdf.read_bytes()
+        real_run = subprocess.run
+        for failure in ("exit", "timeout", "empty"):
+            with self.subTest(failure=failure):
+                def fail_ocr(args, **kwargs):
+                    if args[0] != "tesseract":
+                        return real_run(args, **kwargs)
+                    if failure == "timeout":
+                        raise subprocess.TimeoutExpired(args, 1)
+                    return SimpleNamespace(returncode=1 if failure == "exit" else 0,
+                                           stdout=b"", stderr=b"isolated failure")
+
+                metadata = {}
+                with patch("src.quote_analysis.subprocess.run", side_effect=fail_ocr):
+                    text = _document_text(pdf, "application/pdf", metadata=metadata)
+                self.assertIn("Supplier: Northwind Tools", text)
+                self.assertIn("Source coverage warning", text)
+                self.assertTrue(metadata["ocr_truncated"])
+                self.assertTrue(any("including the detected image region, on page 1" in warning
+                                    for warning in metadata["source_warnings"]))
+                self.assertEqual(pdf.read_bytes(), original)
+
+    def test_rotated_page_geometry_failure_discloses_unverified_images(self):
+        pdf = Path(self.directory.name) / "rotated-unknown-geometry.pdf"
+        self._make_hybrid_image_table_pdf(pdf, page_layouts=[(595, 842, 90, 280, 108)])
+        real_run = subprocess.run
+        for failure in ("exit", "missing_rotation", "invalid_rotation", "missing_size"):
+            with self.subTest(failure=failure):
+                def fail_geometry(args, **kwargs):
+                    result = real_run(args, **kwargs)
+                    if args[0] == "pdfinfo" and "-box" in args:
+                        if failure == "exit":
+                            result.returncode = 1
+                        elif failure == "missing_rotation":
+                            result.stdout = b"\n".join(
+                                line for line in result.stdout.splitlines() if b"rot:" not in line)
+                        elif failure == "invalid_rotation":
+                            result.stdout = result.stdout.replace(b"rot:   90", b"rot:   45")
+                        else:
+                            result.stdout = b"\n".join(
+                                line for line in result.stdout.splitlines() if b"size:" not in line)
+                    return result
+
+                metadata = {}
+                with patch("src.quote_analysis.subprocess.run", side_effect=fail_geometry):
+                    text = _document_text(pdf, "application/pdf", metadata=metadata)
+                self.assertIn("Supplier: Northwind Tools", text)
+                self.assertIn("Source coverage warning", text)
+                self.assertTrue(metadata["ocr_truncated"])
+                self.assertTrue(any("Image regions could not be checked" in warning
+                                    for warning in metadata["source_warnings"]))
 
     def test_quote_rankings_are_deterministic_and_currency_safe(self):
         quotes = [
@@ -576,7 +780,8 @@ class QuoteAnalysisTests(unittest.TestCase):
             worker = QuoteAnalysisWorker(
                 self.store, "https://example.api.runpod.ai", "test-key")
             worker.model_id = "test-model"
-            with patch.object(worker, "_request_model", return_value={"quotes": [{
+            with patch.object(worker, "_get_model_id", return_value="isolated-test-model"), \
+                 patch.object(worker, "_request_model", return_value={"quotes": [{
                 "quote_key": "QUOTE_1", "currency": "MYR", "total_price": 128,
                 "source_warnings": [],
             }]}) as model:
