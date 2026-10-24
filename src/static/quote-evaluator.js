@@ -320,8 +320,21 @@
         const resultHead = el("div", "qe-results-head");
         const statusLabel = statusText(evaluation.status);
         resultHead.appendChild(sectionHeading("03", "Comparison", statusLabel));
-        if (evaluation.status === "queued" || evaluation.status === "processing") {
-          resultHead.appendChild(el("p", "qe-progress-note", "Analysis is running. This view will update automatically."));
+        const result = evaluation.result || {};
+        const progress = result.progress || {};
+        const isActiveEvaluation = evaluation.status === "queued" || evaluation.status === "processing";
+        if (isActiveEvaluation) {
+          let progressText = "Analysis is running. This view will update automatically.";
+          if (progress.stage === "reading") {
+            progressText = `Reading selected sources (${progress.completed || 0} of ${progress.total || 0}).`;
+          } else if (progress.stage === "connecting") {
+            progressText = "Sources are ready. Connecting to RunPod…";
+          } else if (progress.stage === "analyzing") {
+            progressText = `RunPod has returned ${progress.completed || 0} of ${progress.total || 0} quotation results.`;
+          } else if (progress.stage === "ranking") {
+            progressText = "Quotation results are ready. Converting prices and ranking…";
+          }
+          resultHead.appendChild(el("p", "qe-progress-note", progressText));
           const cancelNote = el(
             "p", "qe-cancel-note",
             "Stop to change your sources or priority. The app will discard late results; RunPod may continue the in-flight request remotely."
@@ -342,13 +355,12 @@
           resultHead.appendChild(el("p", "qe-inline-error", evaluation.error || "Analysis could not be completed."));
         }
         section.appendChild(resultHead);
-        if (evaluation.status === "queued" || evaluation.status === "processing") {
+        if (isActiveEvaluation && !Array.isArray(result.quotes)) {
           const progress = el("div", "qe-progress");
           progress.setAttribute("role", "status");
           progress.append(el("span", "qe-skeleton qe-sk-title"), el("span", "qe-skeleton qe-sk-row"), el("span", "qe-skeleton qe-sk-row"));
           section.appendChild(progress);
         }
-        const result = evaluation.result;
         if (evaluation.status === "completed" && result) {
           if (result.summary) section.appendChild(el("p", "qe-summary", result.summary));
           if (Array.isArray(result.limitations) && result.limitations.length) {
@@ -359,38 +371,49 @@
             limitations.appendChild(ul);
             section.appendChild(limitations);
           }
-          const quotes = Array.isArray(result.quotes) ? result.quotes.slice().sort((a, b) => (a.rank || 999) - (b.rank || 999)) : [];
-          if (quotes.length) {
-            const tableWrap = el("div", "qe-table-wrap");
-            const table = el("table", "qe-table");
-            const thead = el("thead");
-            const headerRow = el("tr");
-            ["Rank", "Quotation", "Total (MYR)", "Delivery", "Confidence", "Evidence"].forEach((heading) => headerRow.appendChild(el("th", "", heading)));
-            thead.appendChild(headerRow);
-            const tbody = el("tbody");
-            quotes.forEach((quote) => tbody.appendChild(renderQuoteRow(quote, evaluation, result.recommendation_message_id)));
-            table.append(thead, tbody);
-            tableWrap.appendChild(table);
-            section.appendChild(tableWrap);
-            quotes.forEach((quote) => {
-              const card = renderQuoteCard(quote, evaluation, result.recommendation_message_id);
-              section.appendChild(card);
-            });
-            const selected = evaluation.selected_message_id;
-            if (selected) {
-              const chosen = quotes.find((quote) => String(quote.message_id) === String(selected));
-              const choiceNotice = el("div", "qe-choice-notice");
-              choiceNotice.append(el("span", "qe-choice-check", "Selected"), el("span", "", chosen ? `Your team selected ${chosen.client_name || chosen.filename || "this quotation"}.` : "Your team selected a quotation."));
-              section.appendChild(choiceNotice);
-            }
-          } else {
-            section.appendChild(statePanel("No quotations extracted", "The analysis did not return comparable quotation details. Review the source material and try again."));
+        }
+        const quotes = Array.isArray(result.quotes)
+          ? result.quotes.slice().sort((a, b) => (a.rank || 999) - (b.rank || 999))
+          : [];
+        const hasPartialResults = Boolean(result.partial) && quotes.length > 0;
+        if (quotes.length && (evaluation.status === "completed" || hasPartialResults)) {
+          if (hasPartialResults) {
+            section.appendChild(el(
+              "p", "qe-progress-note qe-partial-note",
+              "Partial results are shown as each source finishes. Final ranking and MYR conversion appear when analysis completes."
+            ));
           }
+          const tableWrap = el("div", "qe-table-wrap");
+          const table = el("table", "qe-table");
+          const thead = el("thead");
+          const headerRow = el("tr");
+          const priceHeading = hasPartialResults ? "Source-currency price" : "Total (MYR)";
+          ["Rank", "Quotation", priceHeading, "Delivery", "Confidence", "Evidence"].forEach((heading) => headerRow.appendChild(el("th", "", heading)));
+          thead.appendChild(headerRow);
+          const tbody = el("tbody");
+          quotes.forEach((quote) => tbody.appendChild(renderQuoteRow(
+            quote, evaluation, result.recommendation_message_id, hasPartialResults)));
+          table.append(thead, tbody);
+          tableWrap.appendChild(table);
+          section.appendChild(tableWrap);
+          quotes.forEach((quote) => {
+            const card = renderQuoteCard(
+              quote, evaluation, result.recommendation_message_id, hasPartialResults);
+            section.appendChild(card);
+          });
+          if (evaluation.status === "completed" && evaluation.selected_message_id) {
+            const chosen = quotes.find((quote) => String(quote.message_id) === String(evaluation.selected_message_id));
+            const choiceNotice = el("div", "qe-choice-notice");
+            choiceNotice.append(el("span", "qe-choice-check", "Selected"), el("span", "", chosen ? `Your team selected ${chosen.client_name || chosen.filename || "this quotation"}.` : "Your team selected a quotation."));
+            section.appendChild(choiceNotice);
+          }
+        } else if (evaluation.status === "completed") {
+          section.appendChild(statePanel("No quotations extracted", "The analysis did not return comparable quotation details. Review the source material and try again."));
         }
         return section;
       }
 
-      function renderQuoteRow(quote, evaluation, recommendedId) {
+      function renderQuoteRow(quote, evaluation, recommendedId, partial = false) {
         const row = el("tr", quote.comparable === false ? "qe-not-comparable" : "");
         const rank = el("td", "qe-rank-cell");
         rank.append(el("span", "qe-rank", quote.rank ? `#${quote.rank}` : "—"));
@@ -401,7 +424,7 @@
         if (quote.extraction_error) vendorCell.appendChild(el("small", "qe-warning", quote.extraction_error));
         appendSourceWarnings(vendorCell, quote);
         row.appendChild(vendorCell);
-        row.appendChild(priceBlock(quote, "td", "qe-price"));
+        row.appendChild(priceBlock(quote, "td", "qe-price", partial));
         row.appendChild(el("td", "", delivery(quote)));
         row.appendChild(el("td", "", quote.confidence == null ? "Not stated" : `${Math.round(Number(quote.confidence) * 100)}%`));
         const evidenceCell = el("td", "qe-evidence-cell");
@@ -420,13 +443,13 @@
         return row;
       }
 
-      function renderQuoteCard(quote, evaluation, recommendedId) {
+      function renderQuoteCard(quote, evaluation, recommendedId, partial = false) {
         const card = el("article", `qe-quote-card${String(quote.message_id) === String(recommendedId) ? " is-recommended" : ""}`);
         const top = el("div", "qe-quote-card-top");
         const label = el("div", "");
         label.append(el("span", "qe-quote-rank", quote.rank ? `#${quote.rank}` : "Quotation"), el("h3", "", quote.vendor || quote.client_name || quote.filename || "Quotation"));
         if (String(quote.message_id) === String(recommendedId)) label.appendChild(el("span", "qe-recommended", "Suggested for selected priority"));
-        top.append(label, priceBlock(quote, "div", "qe-card-price"));
+        top.append(label, priceBlock(quote, "div", "qe-card-price", partial));
         card.appendChild(top);
         appendSourceWarnings(card, quote);
         const facts = el("div", "qe-card-facts");
@@ -505,10 +528,15 @@
         parent.appendChild(note);
       });
     }
-    function priceBlock(quote, tag, className) {
+    function priceBlock(quote, tag, className, partial = false) {
       const block = el(tag, className);
-      block.appendChild(el("strong", "", quote.myr_total_price == null ? "MYR unavailable" : money("MYR", quote.myr_total_price)));
-      if (quote.currency !== "MYR" && quote.total_price != null) {
+      const value = partial && quote.total_price != null
+        ? money(quote.currency, quote.total_price)
+        : quote.myr_total_price == null
+          ? "MYR unavailable"
+          : money("MYR", quote.myr_total_price);
+      block.appendChild(el("strong", "", value));
+      if (!partial && quote.currency !== "MYR" && quote.total_price != null) {
         block.appendChild(el("small", "qe-price-detail", `Original: ${money(quote.currency, quote.total_price)}`));
       }
       if (quote.exchange_rate_date) {

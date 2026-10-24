@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 import zipfile
+import requests
 from unittest.mock import Mock, patch
 from pathlib import Path
 from types import SimpleNamespace
@@ -148,6 +149,82 @@ class QuoteAnalysisTests(unittest.TestCase):
         ], "time")
         self.assertEqual(dated["recommendation_message_id"], "sooner")
 
+    def test_runpod_request_has_bounded_timeouts_and_busy_error(self):
+        worker = QuoteAnalysisWorker(
+            None, "https://example.api.runpod.ai", "test-key", request_timeout=37)
+        worker.model_id = "test-model"
+        with patch("src.quote_analysis.requests.post", side_effect=requests.ReadTimeout) as post:
+            with self.assertRaisesRegex(QuoteAnalysisError, "response timeout"):
+                worker._request_model([], evaluation_id=41)
+        self.assertEqual(post.call_args.kwargs["timeout"], (10, 37))
+
+        with patch("src.quote_analysis.requests.post", return_value=SimpleNamespace(
+                status_code=429, ok=False)):
+            with self.assertRaisesRegex(QuoteAnalysisError, "RunPod is busy"):
+                worker._request_model([], evaluation_id=42)
+
+    def test_comparison_persists_partial_results_while_other_sources_run(self):
+        self.login()
+        self.add_message("partial-one", "MYR 120, delivery in 3 days.")
+        self.add_message("partial-two", "MYR 140, delivery in 5 days.")
+        evaluation = self.store.create_quote_evaluation(
+            ["partial-one", "partial-two"], "balanced")
+        worker = QuoteAnalysisWorker(
+            self.store, "https://example.api.runpod.ai", "fake-test-key")
+        worker.model_id = "test-model"
+        slow_request_started = threading.Event()
+        release_slow_request = threading.Event()
+        failures = []
+
+        def fake_model_request(user_content, _evaluation_id=None):
+            prompt = "\n".join(
+                part.get("text", "") for part in user_content if part.get("type") == "text")
+            quote_key = "QUOTE_2" if "Quotation QUOTE_2" in prompt else "QUOTE_1"
+            if quote_key == "QUOTE_2":
+                slow_request_started.set()
+                release_slow_request.wait(5)
+            return {"quotes": [{
+                "quote_key": quote_key,
+                "vendor": quote_key,
+                "currency": "MYR",
+                "total_price": 120 if quote_key == "QUOTE_1" else 140,
+                "delivery_days": 3 if quote_key == "QUOTE_1" else 5,
+                "delivery_unit": "calendar_days",
+            }]}
+
+        def run_analysis():
+            try:
+                worker._analyze(evaluation["id"])
+            except Exception as error:
+                failures.append(error)
+
+        try:
+            with patch.object(worker, "_request_model", side_effect=fake_model_request):
+                thread = threading.Thread(target=run_analysis)
+                thread.start()
+                self.assertTrue(slow_request_started.wait(3))
+                deadline = time.monotonic() + 3
+                partial = self.store.quote_evaluation(evaluation["id"])
+                while len(partial["result"].get("quotes", [])) < 1 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                    partial = self.store.quote_evaluation(evaluation["id"])
+                self.assertEqual(partial["status"], "processing")
+                self.assertTrue(partial["result"]["partial"])
+                self.assertEqual(partial["result"]["progress"]["completed"], 1)
+                self.assertEqual(len(partial["result"]["quotes"]), 1)
+                polled = self.client.get(f"/api/quote-evaluations/{evaluation['id']}")
+                self.assertEqual(polled.status_code, 200)
+                self.assertTrue(polled.json["evaluation"]["result"]["partial"])
+                release_slow_request.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+            self.assertEqual(failures, [])
+            completed = self.store.quote_evaluation(evaluation["id"])
+            self.assertEqual(completed["status"], "completed")
+            self.assertEqual(len(completed["result"]["quotes"]), 2)
+        finally:
+            release_slow_request.set()
+
     def test_quote_sources_are_private_persisted_and_selectable(self):
         self.add_message("quote-one", "MYR 950, delivery within 6 calendar days.")
         self.assertEqual(self.client.get("/api/quote-candidates").status_code, 401)
@@ -231,6 +308,7 @@ class QuoteAnalysisTests(unittest.TestCase):
             "review_token": review.json["review_token"]})
         self.assertEqual(started.status_code, 202)
         worker = QuoteAnalysisWorker(self.store, "https://example.api.runpod.ai", "test-key")
+        worker.model_id = "test-model"
         with patch.object(worker, "_request_model", return_value={"quotes": [{
             "quote_key": "QUOTE_1", "vendor": "Test", "currency": "MYR", "total_price": 123,
         }]}) as model:
@@ -346,6 +424,7 @@ class QuoteAnalysisTests(unittest.TestCase):
             self.assertEqual(started.status_code, 202)
             worker = QuoteAnalysisWorker(
                 self.store, "https://example.api.runpod.ai", "test-key")
+            worker.model_id = "test-model"
             with patch.object(worker, "_request_model", return_value={"quotes": [{
                 "quote_key": "QUOTE_1", "currency": "MYR", "total_price": 128,
                 "source_warnings": [],
@@ -501,6 +580,7 @@ class QuoteAnalysisTests(unittest.TestCase):
                 "review_token": review.json["review_token"]})
             self.assertEqual(started.status_code, 202)
             worker = QuoteAnalysisWorker(self.store, "https://example.api.runpod.ai", "test-key")
+            worker.model_id = "test-model"
             with patch.object(worker, "_request_model", return_value={"quotes": [{
                 "quote_key": "QUOTE_1", "currency": "MYR", "total_price": 128,
                 "source_warnings": [],  # The model cannot suppress local warnings.
@@ -626,6 +706,7 @@ class QuoteAnalysisTests(unittest.TestCase):
         evaluation = self.store.create_quote_evaluation(["quote-running"], "balanced")
         worker = QuoteAnalysisWorker(
             self.store, "https://example.api.runpod.ai", "fake-test-only-key")
+        worker.model_id = "test-model"
         self.app.extensions["quote_worker"] = worker
         request_started = threading.Event()
         finish_request = threading.Event()
