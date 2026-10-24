@@ -241,10 +241,10 @@ Serverless GPU Orchestration & Cost Control
 
 | Name           |     Role                              | GitHub                            |
 | -----------    | -------------------            | ---------------------------------------- |
-| Chin Xian Jing       | Team Lead / Slide / demo | [@username](https://github.com/username) |
-| Dylan Chong Jia Ying | Frontend                 | [@username](https://github.com/username) |
+| Chin Xian Jing       | Team Lead / Slide / demo | [@xianjing0702-svg](https://github.com/xianjing0702-svg) |
+| Dylan Chong Jia Ying | Frontend                 | [@dylanchong0820](https://github.com/dylanchong0820) |
 | Zackary Sim Kah Yao  | Slide                    | [@username](https://github.com/username) |
-| Jovi Lim Kai Piin    | AI / RunPod              | [@username](https://github.com/username) |
+| Jovi Lim Kai Piin    | AI / RunPod              | [@noob-2](https://github.com/noob-2) |
 ---
 
 ## Submission Checklist
