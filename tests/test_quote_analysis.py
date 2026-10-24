@@ -8,7 +8,7 @@ import threading
 import time
 import unittest
 import zipfile
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -725,6 +725,81 @@ class QuoteAnalysisTests(unittest.TestCase):
         _, audio_parts, _ = worker._prepare_message(audio_row, "QUOTE_2", 0)
         self.assertEqual(audio_parts[1]["type"], "input_audio")
         self.assertEqual(audio_parts[1]["input_audio"]["format"], "ogg")
+
+    def test_multimodal_readiness_uses_only_synthetic_image_and_ogg_samples(self):
+        worker = QuoteAnalysisWorker(None, "https://example.api.runpod.ai", "fake-test-key")
+        models = SimpleNamespace(
+            status_code=200, ok=True,
+            json=lambda: {"data": [{"id": "served-synthetic-model"}]},
+        )
+        image_result = SimpleNamespace(
+            status_code=200, ok=True,
+            json=lambda: {"choices": [{"message": {"content": "blue"}}]},
+        )
+        audio_result = SimpleNamespace(
+            status_code=200, ok=True,
+            json=lambda: {"choices": [{"message": {"content": "The word is amber."}}]},
+        )
+        with patch("src.quote_analysis.requests.get", return_value=models) as get_model, \
+                patch("src.quote_analysis.requests.post",
+                      side_effect=[image_result, audio_result]) as post:
+            result = worker.check_multimodal_readiness()
+
+        self.assertEqual(result["model_id"], "served-synthetic-model")
+        self.assertTrue(result["model_ready"])
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["image"]["ready"])
+        self.assertTrue(result["ogg_voice"]["ready"])
+        get_model.assert_called_once()
+        image_part = post.call_args_list[0].kwargs["json"]["messages"][0]["content"][1]
+        self.assertEqual(image_part["type"], "image_url")
+        self.assertTrue(image_part["image_url"]["url"].startswith("data:image/png;base64,"))
+        audio_part = post.call_args_list[1].kwargs["json"]["messages"][0]["content"][1]
+        self.assertEqual(audio_part["type"], "input_audio")
+        self.assertEqual(audio_part["input_audio"]["format"], "ogg")
+        self.assertTrue(
+            base64.b64decode(audio_part["input_audio"]["data"]).startswith(b"OggS")
+        )
+
+    def test_multimodal_readiness_reports_per_format_rejection(self):
+        worker = QuoteAnalysisWorker(None, "https://example.api.runpod.ai", "fake-test-key")
+        models = SimpleNamespace(
+            status_code=200, ok=True,
+            json=lambda: {"data": [{"id": "served-synthetic-model"}]},
+        )
+        image_rejected = SimpleNamespace(status_code=415, ok=False)
+        audio_result = SimpleNamespace(
+            status_code=200, ok=True,
+            json=lambda: {"choices": [{"message": {"content": "The word is amber."}}]},
+        )
+        with patch("src.quote_analysis.requests.get", return_value=models), \
+                patch("src.quote_analysis.requests.post",
+                      side_effect=[image_rejected, audio_result]):
+            result = worker.check_multimodal_readiness()
+
+        self.assertFalse(result["ready"])
+        self.assertFalse(result["image"]["ready"])
+        self.assertIn("image input", result["image"]["message"])
+        self.assertTrue(result["ogg_voice"]["ready"])
+
+    def test_readiness_endpoint_is_staff_only_and_returns_check_results(self):
+        url = "/api/quote-analysis-readiness"
+        self.assertEqual(self.client.post(
+            url, json={}, headers={"X-CSRF-Token": self.csrf}).status_code, 401)
+        self.login()
+        checker = Mock(return_value={
+            "model_id": "synthetic-test-model",
+            "model_ready": True,
+            "ready": False,
+            "image": {"ready": False, "message": "Image format rejected."},
+            "ogg_voice": {"ready": True, "message": "Synthetic sample recognized successfully."},
+        })
+        self.app.extensions["quote_worker"].check_multimodal_readiness = checker
+        response = self.post(url, {})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["readiness"]["model_id"], "synthetic-test-model")
+        self.assertFalse(response.json["readiness"]["image"]["ready"])
+        checker.assert_called_once_with()
 
 
 if __name__ == "__main__":

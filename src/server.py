@@ -408,6 +408,14 @@ def create_app(config=None):
             quote_count=quote_count,
         )
 
+    @app.post("/api/quote-analysis-readiness")
+    @require_staff
+    def quote_analysis_readiness():
+        checker = getattr(app.extensions["quote_worker"], "check_multimodal_readiness", None)
+        if not callable(checker):
+            return jsonify(error="RunPod readiness checks are not available."), 503
+        return jsonify(readiness=checker())
+
     @app.post("/api/messages/<path:message_id>/retry-media")
     @require_staff
     def retry_media(message_id):

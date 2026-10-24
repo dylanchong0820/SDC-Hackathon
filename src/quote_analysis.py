@@ -872,6 +872,117 @@ class QuoteAnalysisWorker:
         self.model_id = model_id
         return model_id
 
+    def check_multimodal_readiness(self):
+        """Probe image and WhatsApp OGG support using bundled synthetic samples only."""
+        result = {
+            "model_id": None,
+            "model_ready": False,
+            "image": {"ready": False, "message": "Not tested because the model is not ready."},
+            "ogg_voice": {"ready": False, "message": "Not tested because the model is not ready."},
+        }
+        try:
+            model_id = self._get_model_id()
+        except QuoteAnalysisError as error:
+            result["error"] = str(error)
+            return result
+
+        result["model_id"] = model_id
+        result["model_ready"] = True
+        samples = Path(__file__).resolve().parent / "static"
+        result["image"] = self._probe_synthetic_format(
+            model_id, samples / "quote-readiness-image.png", "image", "blue")
+        result["ogg_voice"] = self._probe_synthetic_format(
+            model_id, samples / "quote-readiness-voice.ogg", "audio", "amber")
+        result["ready"] = result["image"]["ready"] and result["ogg_voice"]["ready"]
+        return result
+
+    def _probe_synthetic_format(self, model_id, sample_path, media_type, expected_word):
+        if not sample_path.is_file():
+            label = "image" if media_type == "image" else "OGG voice"
+            return {"ready": False, "message": f"The synthetic {label} check sample is missing."}
+        try:
+            encoded = base64.b64encode(sample_path.read_bytes()).decode("ascii")
+        except OSError:
+            label = "image" if media_type == "image" else "OGG voice"
+            return {"ready": False, "message": f"The synthetic {label} check sample could not be read."}
+
+        if media_type == "image":
+            label = "synthetic image"
+            prompt = (
+                "This is a synthetic readiness check image with a blue upper half and a yellow lower half. "
+                "What color is the upper half? Reply with the color word only."
+            )
+            media_part = {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64," + encoded},
+            }
+        else:
+            label = "synthetic WhatsApp OGG voice"
+            prompt = (
+                "This is a synthetic readiness check voice recording. Transcribe its spoken words. "
+                "Reply with the words only."
+            )
+            media_part = {
+                "type": "input_audio",
+                "input_audio": {"data": encoded, "format": "ogg"},
+            }
+        payload = {
+            "model": model_id,
+            "temperature": 0,
+            "max_tokens": 80,
+            "messages": [{
+                "role": "user",
+                "content": [{"type": "text", "text": prompt}, media_part],
+            }],
+        }
+        try:
+            response = requests.post(
+                self.endpoint_url + "/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                },
+                json=payload,
+                timeout=(10, min(self.request_timeout, 120)),
+            )
+        except requests.Timeout:
+            return {"ready": False, "message": f"RunPod timed out while checking {label} support."}
+        except requests.RequestException:
+            return {"ready": False, "message": f"Could not connect to RunPod to check {label} support."}
+
+        if response.status_code in (401, 403):
+            message = "RunPod rejected the API key. Update RUNPOD_API_KEY in Replit Secrets."
+        elif response.status_code in (400, 413, 415, 422):
+            message = (
+                f"The served model rejected the synthetic {media_type} input "
+                f"(HTTP {response.status_code}); this format is not ready."
+            )
+        elif response.status_code == 429:
+            message = f"RunPod is busy; retry the {label} check."
+        elif not response.ok:
+            message = f"RunPod could not check {label} support (HTTP {response.status_code})."
+        else:
+            try:
+                content = response.json()["choices"][0]["message"]["content"]
+                if isinstance(content, list):
+                    content = "".join(
+                        str(part.get("text", ""))
+                        for part in content if isinstance(part, dict)
+                    )
+                if not isinstance(content, str) or not content.strip():
+                    raise ValueError
+            except (ValueError, KeyError, IndexError, TypeError):
+                message = f"RunPod accepted the {label} request but returned no readable text."
+            else:
+                if expected_word in content.casefold():
+                    return {"ready": True, "message": "Synthetic sample recognized successfully."}
+                message = (
+                    f"RunPod accepted the {label} request but did not recognize the expected "
+                    "synthetic sample. Check this format before staff rely on it."
+                )
+        return {"ready": False, "message": message}
+
     def preview_sources(self, rows):
         """Read locally only: never invokes model discovery or inference."""
         previews, digests = [], {}

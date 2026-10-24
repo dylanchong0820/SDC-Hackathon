@@ -39,6 +39,9 @@
       reviewing: false,
       review: null,
       confirmed: new Set(),
+      readiness: null,
+      readinessChecking: false,
+      readinessError: "",
       error: "",
       pollTimer: null,
       cancellingId: null,
@@ -111,6 +114,46 @@
       disclosureCopy.append(el("strong", "", "Before analysis: "), document.createTextNode("review the locally extracted text, then explicitly confirm which sources to send to RunPod. Previewing does not contact AI. No WhatsApp reply is sent."));
       disclosure.appendChild(disclosureCopy);
 
+      const readinessPanel = el("section", "qe-panel qe-readiness");
+      readinessPanel.appendChild(sectionHeading("AI", "Model readiness", "Synthetic checks only"));
+      readinessPanel.appendChild(el(
+        "p",
+        "qe-panel-hint",
+        "Check the served model with a synthetic image and OGG voice clip. Only these test samples are sent; saved customer messages and attachments are never used."
+      ));
+      const readinessButton = button(
+        state.readinessChecking ? "Checking model…" : "Check image and voice support",
+        "qe-secondary-button",
+        checkReadiness
+      );
+      readinessButton.disabled = state.readinessChecking;
+      readinessPanel.appendChild(readinessButton);
+      if (state.readinessError) {
+        const error = el("p", "qe-inline-error", state.readinessError);
+        error.setAttribute("role", "alert");
+        readinessPanel.appendChild(error);
+      }
+      if (state.readiness) {
+        const status = el("div", "qe-readiness-results");
+        status.setAttribute("role", "status");
+        if (state.readiness.model_id) {
+          status.appendChild(el("p", "qe-readiness-model", `Served model: ${state.readiness.model_id}`));
+        } else if (state.readiness.error) {
+          status.appendChild(el("p", "qe-inline-error", state.readiness.error));
+        }
+        status.append(
+          readinessResult("Image input", state.readiness.image),
+          readinessResult("WhatsApp OGG voice input", state.readiness.ogg_voice)
+        );
+        readinessPanel.appendChild(status);
+      } else if (!state.readinessChecking && !state.readinessError) {
+        readinessPanel.appendChild(el(
+          "p",
+          "qe-readiness-not-checked",
+          "Readiness has not been checked in this session."
+        ));
+      }
+
       const layout = el("div", "qe-layout");
       const selectionPanel = el("section", "qe-panel qe-input-panel");
       selectionPanel.appendChild(sectionHeading("01", "Choose source material", `${state.candidates.length} available`));
@@ -171,7 +214,7 @@
       }
 
       layout.append(selectionPanel, controls);
-      root.append(header, intro, disclosure, layout);
+      root.append(header, intro, disclosure, readinessPanel, layout);
       if (state.review) root.appendChild(renderReview());
       if (state.evaluations.length) root.appendChild(renderRecentEvaluations());
       if (state.evaluation) root.appendChild(renderEvaluation(state.evaluation));
@@ -432,6 +475,15 @@
       return panel;
     }
 
+    function readinessResult(label, result) {
+      const item = el("div", `qe-readiness-item${result && result.ready ? " is-ready" : " is-error"}`);
+      item.append(
+        el("strong", "", `${label}: ${result && result.ready ? "Ready" : "Needs attention"}`),
+        el("span", "", result && result.message ? result.message : "Not checked.")
+      );
+      return item;
+    }
+
     function statusText(status) {
       return ({
         queued: "Queued",
@@ -570,6 +622,29 @@
         state.error = error && error.message ? error.message : "Could not start quotation analysis.";
       } finally {
         state.submitting = false;
+        render();
+      }
+    }
+
+    async function checkReadiness() {
+      if (state.readinessChecking) return;
+      state.readinessChecking = true;
+      state.readinessError = "";
+      render();
+      try {
+        const response = await request("/api/quote-analysis-readiness", {
+          method: "POST",
+          body: {}
+        });
+        state.readiness = response && response.readiness;
+        if (!state.readiness) throw new Error("The RunPod readiness check returned no result.");
+      } catch (error) {
+        state.readiness = null;
+        state.readinessError = error && error.message
+          ? error.message
+          : "Could not check RunPod image and voice support.";
+      } finally {
+        state.readinessChecking = false;
         render();
       }
     }
