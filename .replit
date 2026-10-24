@@ -49,3 +49,4 @@ WHATSAPP_PHONE_NUMBER_ID = "1441593582361913"
 deploymentTarget = "vm"
 run = ["gunicorn", "--config", "gunicorn.conf.py", "src.production:create_production_app()"]
 build = ["bash", "scripts/build-production.sh"]
+ignorePorts = false
