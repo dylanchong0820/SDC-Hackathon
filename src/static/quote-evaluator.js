@@ -83,6 +83,42 @@
       if (state.pollTimer) window.clearTimeout(state.pollTimer);
       state.pollTimer = null;
     };
+    const timingLabels = {
+      queue: "Queue wait",
+      reading: "Local file reading / OCR",
+      connecting: "Model discovery",
+      analyzing: "RunPod inference",
+      ranking: "Conversion / ranking"
+    };
+    function refreshTimings() {
+      const evaluation = state.evaluation;
+      if (!evaluation) return;
+      const timings = (evaluation.result || {}).timings || {};
+      let longest = null;
+      let longestSeconds = 0;
+      container.querySelectorAll("[data-qe-timing]").forEach((node) => {
+        const key = node.dataset.qeTiming;
+        const value = timings[key];
+        if (!value) return;
+        const running = isActive(evaluation) && Number.isFinite(value.started_at);
+        const seconds = Math.max(0, Number(value.seconds) || 0) +
+          (running ? Math.max(0, Date.now() / 1000 - value.started_at) : 0);
+        const duration = seconds < 1 ? "<1s" : seconds < 60
+          ? `${Math.floor(seconds)}s`
+          : `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
+        node.textContent = `${duration}${running ? " · running" : ""}`;
+        if (seconds > longestSeconds) {
+          longestSeconds = seconds;
+          longest = key;
+        }
+      });
+      const summary = container.querySelector(".qe-timing-summary");
+      if (summary) summary.textContent = longest
+        ? `Most time ${isActive(evaluation) ? "so far" : "spent"}: ${timingLabels[longest]}.`
+        : "Timing has just started.";
+    }
+    // Update only timer text: no requests or replacement of focused controls.
+    const timingTimer = window.setInterval(refreshTimings, 1000);
 
     function render() {
       if (state.destroyed) return;
@@ -328,7 +364,9 @@
         const isActiveEvaluation = evaluation.status === "queued" || evaluation.status === "processing";
         if (isActiveEvaluation) {
           let progressText = "Analysis is running. This view will update automatically.";
-          if (progress.stage === "reading") {
+          if (evaluation.status === "queued") {
+            progressText = "Waiting for a local comparison worker…";
+          } else if (progress.stage === "reading") {
             progressText = `Reading selected sources (${progress.completed || 0} of ${progress.total || 0}).`;
           } else if (progress.stage === "connecting") {
             progressText = "Sources are ready. Connecting to RunPod…";
@@ -358,6 +396,26 @@
           ));
         } else if (evaluation.status === "failed") {
           resultHead.appendChild(el("p", "qe-inline-error", evaluation.error || "Analysis could not be completed."));
+        }
+        if (result.timings) {
+          const timingPanel = el("div", "qe-timings");
+          timingPanel.setAttribute("aria-label", "Comparison stage timings");
+          const list = el("dl", "qe-timing-list");
+          Object.entries(timingLabels).forEach(([key, label]) => {
+            const row = el("div", "qe-timing-item");
+            const value = el("dd", "", "Not reached");
+            value.dataset.qeTiming = key;
+            row.append(el("dt", "", label), value);
+            list.appendChild(row);
+          });
+          timingPanel.append(
+            list, el("p", "qe-timing-summary"),
+            el("p", "qe-timing-help",
+              "Elapsed time per step, not per file. Queue wait is in this app. Local reading includes OCR; RunPod inference includes remote queue/network wait and image or voice processing. Parallel requests overlap, so their times are not added together.")
+          );
+          resultHead.appendChild(timingPanel);
+          // Run once after the new view is attached.
+          window.queueMicrotask(() => { if (!state.destroyed) refreshTimings(); });
         }
         section.appendChild(resultHead);
         const sourceIds = evaluation.source_message_ids || [];
@@ -809,6 +867,7 @@
       destroy() {
         state.destroyed = true;
         clearPoll();
+        window.clearInterval(timingTimer);
         if (container) container.replaceChildren();
       },
       refresh: loadCandidates

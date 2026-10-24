@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from datetime import datetime
 import json
+import logging
 import mimetypes
 import os
 from pathlib import Path
@@ -13,8 +14,10 @@ import uuid
 
 if __package__:
     from .quote_retry import ranked_message_ids, with_retry_metadata
+    from .quote_timing import advance_timings, TERMINAL
 else:
     from quote_retry import ranked_message_ids, with_retry_metadata
+    from quote_timing import advance_timings, TERMINAL
 
 
 # Serialize the complete connection lifecycle, not just writes. Concurrent
@@ -116,6 +119,15 @@ class Store:
             source_columns = {row["name"] for row in db.execute("PRAGMA table_info(quote_evaluation_sources)")}
             if "reviewed_digest" not in source_columns:
                 db.execute("ALTER TABLE quote_evaluation_sources ADD COLUMN reviewed_digest TEXT")
+            for row in db.execute("""
+                SELECT id,result_json FROM quote_evaluations
+                WHERE status IN ('queued','processing')
+            """).fetchall():
+                result = json.loads(row["result_json"] or "{}")
+                if result.get("timings"):
+                    result["timings"] = advance_timings(result["timings"], None)
+                    db.execute("UPDATE quote_evaluations SET result_json=? WHERE id=?",
+                               (json.dumps(result, ensure_ascii=False), row["id"]))
             db.execute("""
                 UPDATE quote_evaluations
                 SET status='failed', error='The server restarted before analysis finished.',
@@ -358,11 +370,13 @@ class Store:
                 VALUES (?,?,?,'queued')
             """, (now, now, priority))
             evaluation_id = cursor.lastrowid
+            result = {"timings": advance_timings({}, "queue")}
             if retry:
-                db.execute("UPDATE quote_evaluations SET result_json=? WHERE id=?",
-                           (json.dumps({"partial": True, "quotes": [
-                               item["quote"] for item in retry["retained"].values()
-                           ], "retry": retry}, ensure_ascii=False), evaluation_id))
+                result.update({"partial": True, "quotes": [
+                    item["quote"] for item in retry["retained"].values()
+                ], "retry": retry})
+            db.execute("UPDATE quote_evaluations SET result_json=? WHERE id=?",
+                       (json.dumps(result, ensure_ascii=False), evaluation_id))
             db.executemany("""
                 INSERT INTO quote_evaluation_sources
                     (evaluation_id,message_id,conversation_id,position,reviewed_digest)
@@ -392,6 +406,22 @@ class Store:
         if status not in {"queued", "processing", "completed", "failed", "cancelled"}:
             raise ValueError("Invalid quote evaluation status.")
         with self.db() as db:
+            previous = db.execute(
+                "SELECT status,result_json FROM quote_evaluations WHERE id=?",
+                (evaluation_id,)).fetchone()
+            if previous and previous["status"] in {"queued", "processing"}:
+                saved = json.loads(previous["result_json"] or "{}")
+                result = dict(saved if result is None else result)
+                stage = None if status in TERMINAL else (
+                    result.get("progress", {}).get("stage") or
+                    ("reading" if status == "processing" else "queue"))
+                result["timings"] = advance_timings(saved.get("timings", {}), stage)
+                if status in TERMINAL:
+                    # Only allowlisted stage names and numeric durations; no job,
+                    # source, staff identifiers, errors, or exception payloads.
+                    logging.info("Comparison timings status=%s seconds=%s", status, {
+                        key: value["seconds"] for key, value in result["timings"].items()
+                    })
             if result is None:
                 db.execute("""
                     UPDATE quote_evaluations SET status=?,error=?,updated_at=?
@@ -410,15 +440,8 @@ class Store:
 
     def cancel_quote_evaluation(self, evaluation_id):
         """Cancel an active comparison without allowing late worker results to replace it."""
-        with self.db() as db:
-            db.execute("""
-                UPDATE quote_evaluations
-                SET status='cancelled',error='Stopped by staff.',updated_at=?
-                WHERE id=? AND status IN ('queued','processing')
-            """, (int(time.time()), evaluation_id))
-            exists = db.execute(
-                "SELECT 1 FROM quote_evaluations WHERE id=?", (evaluation_id,)).fetchone()
-        return self.quote_evaluation(evaluation_id) if exists else None
+        return self.update_quote_evaluation(
+            evaluation_id, "cancelled", error="Stopped by staff.")
 
     def quote_evaluation(self, evaluation_id):
         with self.db() as db:

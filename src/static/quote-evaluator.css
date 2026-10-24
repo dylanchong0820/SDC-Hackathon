@@ -1,3 +1,21 @@
+.qe-timings {
+  margin: 14px 0;
+  padding: 12px;
+  border: 1px solid hsl(var(--qe-line));
+  border-radius: 8px;
+  min-width: 0;
+}
+.qe-timing-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.qe-timing-item { min-width: 0; overflow-wrap: anywhere; }
+.qe-timing-item dt { font-size: 12px; color: #52636b; }
+.qe-timing-item dd { margin: 4px 0 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+.qe-timing-summary { margin: 12px 0 4px; font-size: 13px; font-weight: 600; }
+.qe-timing-help { margin: 0; font-size: 12px; line-height: 1.5; color: #52636b; }
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@600;700;800&display=swap');
 
 .qe-root {

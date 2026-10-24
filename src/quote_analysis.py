@@ -948,7 +948,7 @@ class QuoteAnalysisWorker:
                 self.store.update_quote_evaluation(
                     evaluation_id, "failed", error=str(error))
             except Exception:
-                logging.exception("Quotation analysis failed for evaluation %s", evaluation_id)
+                logging.error("Quotation analysis failed unexpectedly; source details omitted.")
                 self.store.update_quote_evaluation(
                     evaluation_id, "failed",
                     error="Quote analysis failed unexpectedly. The original messages and files are unchanged.")
@@ -1341,9 +1341,6 @@ class QuoteAnalysisWorker:
         updated = self.store.update_quote_evaluation(evaluation_id, "processing")
         if not updated or updated["status"] != "processing":
             return
-        if not self.api_key:
-            raise QuoteAnalysisError("RUNPOD_API_KEY is not configured in Replit Secrets.")
-
         total = len(current["messages"])
         retry = json.loads(current["evaluation"]["result_json"] or "{}").get("retry")
         retained = retry.get("retained", {}) if retry else {}
@@ -1374,6 +1371,11 @@ class QuoteAnalysisWorker:
 
         media_total = 0
         total_text = 0
+        # Publish before the first potentially expensive local read/OCR.
+        if not snapshot("reading", 0, total):
+            return
+        if not self.api_key:
+            raise QuoteAnalysisError("RUNPOD_API_KEY is not configured in Replit Secrets.")
         for index, row in enumerate(current["messages"], start=1):
             if self._is_cancelled(evaluation_id):
                 return

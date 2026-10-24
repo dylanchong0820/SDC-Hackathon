@@ -1362,7 +1362,9 @@ class QuoteAnalysisTests(unittest.TestCase):
         unchanged = self.store.update_quote_evaluation(
             evaluation["id"], "completed", result=late_result)
         self.assertEqual(unchanged["status"], "cancelled")
-        self.assertEqual(unchanged["result"], {})
+        self.assertEqual(unchanged["result"], stopped.json["evaluation"]["result"])
+        self.assertNotIn("quotes", unchanged["result"])
+        self.assertNotIn("started_at", unchanged["result"]["timings"]["queue"])
 
         completed = self.store.create_quote_evaluation(["quote-cancel"], "price")
         self.store.update_quote_evaluation(completed["id"], "completed", result={})
